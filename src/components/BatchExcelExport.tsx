@@ -1,19 +1,32 @@
+import {measureReads} from '../lib/readDiagnostics';
+import {ViewportModal} from './ViewportModal';
+import { SettingsFeature, SettingsGroup, settingsRowClass } from './SettingsGroup';
+import { getMonthlySettings } from '../lib/monthlySettings';
+import { excelExportOfficePriority } from '../lib/excelExportOfficeScope';
+import {officeAttendanceDates, supportDateKey} from '../lib/supportOfficeAttendance';
+import {collectOfficeFuturePlans, supplementSupportFutureRows} from '../lib/supportFuturePlans';
+import {getMonthlyTreeCommunications} from '../lib/monthlyTreeCommunications';
 import React, { useState, useMemo } from 'react';
-import { createPortal } from 'react-dom';
 import { 
   FolderOpen, FileSpreadsheet, CheckCircle2, AlertCircle, 
-  Loader2, Check, X, Layers
+  Loader2, Check, X
 } from 'lucide-react';
-import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs as firestoregetDocs, doc, getDoc as firestoregetDoc, documentId } from 'firebase/firestore';
+const getDocs=measureReads('Excel一括上書き',firestoregetDocs);
+const getDoc=measureReads('Excel一括上書き',firestoregetDoc);
+
 import { db } from '../lib/firebase';
 import type { Child } from '../data/mockData';
 import type { DailyReport } from '../types/supportPlan';
-import { cloneTemplateAndWriteExcelFile } from '../lib/excelExport';
+import { cloneTemplateAndWriteExcelFile, existingExcelRows } from '../lib/excelExport';
 import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
+import { OneTimeExcelDateRepair } from './OneTimeExcelDateRepair';
 
 interface BatchExcelExportProps {
   selectedMonth: string; // "YYYY-MM"
   childrenData: Child[];
+  selectedOfficeId: string;
 }
 
 interface ScannedExcelItem {
@@ -33,7 +46,8 @@ interface ScannedExcelItem {
 
 export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
   selectedMonth: initialMonth,
-  childrenData
+  childrenData,
+  selectedOfficeId
 }) => {
   const [targetMonth, setTargetMonth] = useState<string>(initialMonth || new Date().toISOString().slice(0, 7));
   const [isScanning, setIsScanning] = useState<boolean>(false);
@@ -56,6 +70,13 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
     creator: string;
     createdDateText: string;
   }>({ creator: '', createdDateText: '' });
+  const [loadedSettingsKey, setLoadedSettingsKey] = useState('');
+  const [scanContext, setScanContext] = useState<{ key: string; creator: string; createdDateText: string; directoryHandle: any } | null>(null);
+  const settingsKey = `${selectedOfficeId}_${targetMonth}`;
+  const folderInputRef = React.useRef<HTMLInputElement>(null);
+  const [downloadMode, setDownloadMode] = useState(false);
+  const [folderMessage, setFolderMessage] = useState('');
+  const [isPicking, setIsPicking] = useState(false);
 
   // 月変更時の同期
   React.useEffect(() => {
@@ -66,9 +87,13 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
 
   // 該当月のシステム設定（専門的支援実施計画の作成日・作成者）を取得
   React.useEffect(() => {
+    let cancelled = false;
+    setLoadedSettingsKey('');
+    setMonthSettings({ creator: '', createdDateText: '' });
     const fetchMonthlySettings = async () => {
       try {
-        const snap = await getDoc(doc(db, 'monthlySettings', targetMonth));
+        const snap = await getMonthlySettings(selectedOfficeId, targetMonth);
+        if (cancelled) return;
         if (snap.exists()) {
           const data = snap.data();
           const y = data.implementationYear;
@@ -85,12 +110,14 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
         } else {
           setMonthSettings({ creator: '', createdDateText: '' });
         }
+        setLoadedSettingsKey(`${selectedOfficeId}_${targetMonth}`);
       } catch (err) {
         console.error('Failed to fetch monthly settings:', err);
       }
     };
     fetchMonthlySettings();
-  }, [targetMonth]);
+    return () => { cancelled = true; };
+  }, [targetMonth, selectedOfficeId]);
 
   // 名前の正規化
   const normalize = (s?: string) => (s || '').replace(/[\s　\u200B-\u200D\uFEFF]/g, '').toLowerCase();
@@ -108,7 +135,7 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
       if (c2) return c2;
       const c3 = childrenData.find(c => {
         const full = normalize(c.fullName);
-        return full.includes(normRaw) || normRaw.includes(full);
+        return !!full && (full.includes(normRaw) || normRaw.includes(full));
       });
       if (c3) return c3;
     }
@@ -125,25 +152,34 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
   };
 
   // フォルダ選択とスキャン処理
-  const handleSelectFolder = async () => {
-    if (!('showDirectoryPicker' in window)) {
+  const handleSelectFolder = async (selectedFiles?: File[]) => {
+    if (!selectedOfficeId || loadedSettingsKey !== settingsKey) {
+      alert('対象事業所の設定を読み込めていません。設定画面を開き直してください。');
+      return;
+    }
+    const exportContext = { key: settingsKey, ...monthSettings };
+    if (!selectedFiles && !('showDirectoryPicker' in window)) {
       alert('お使いのブラウザはフォルダ選択機能（File System Access API）に対応していません。Google Chrome または Microsoft Edge でご利用ください。');
       return;
     }
 
     try {
-      const dirHandle = await (window as any).showDirectoryPicker({
-        mode: 'readwrite'
-      });
+      setFolderMessage('');
+      setIsPicking(!selectedFiles);
+      // 照合時は読み取りだけ許可を求め、書き込みは実行ボタンのクリック時に求める。
+      const dirHandle = selectedFiles ? null : await (window as any).showDirectoryPicker({mode: 'read'});
+      setIsPicking(false);
+      setDownloadMode(!!selectedFiles);
 
       setIsScanning(true);
       setScannedItems([]);
       setScanProgress({ current: 0, total: 0, fileName: '' });
-      setLogs([`フォルダ「${dirHandle.name}」内のエクセルファイルを検索中...`]);
+      setLogs(['フォルダ内のExcelファイルを検索中…']);
 
       const excelFiles: any[] = [];
-      for await (const entry of dirHandle.values()) {
-        if (entry.kind === 'file' && (entry.name.endsWith('.xlsx') || entry.name.endsWith('.xls')) && !entry.name.startsWith('~$')) {
+      const entries = selectedFiles ? selectedFiles.map(file => ({kind: 'file', name: file.name, getFile: async () => file})) : dirHandle.values();
+      for await (const entry of entries) {
+        if (entry.kind === 'file' && /\.xlsx?$/i.test(entry.name) && !entry.name.startsWith('~$')) {
           excelFiles.push(entry);
         }
       }
@@ -161,31 +197,53 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
 
       // Firestore から今月分の supportPlans と daily_reports を一括取得（ネットワークを劇的に高速化）
       const goalsMap = new Map<string, string>();
+      const goalPriorities = new Map<string, number>();
       const dailyMap = new Map<string, DailyReport[]>();
+      const childrenById = new Map(childrenData.filter(child => child.id).map(child => [child.id!, child]));
+      let attendanceRecords: {id: string; data: any}[] = [];
+      const attendanceByChild = new Map<string, Set<string>>();
+      const futureLoads = new Map<string, Promise<Record<string, string>>>();
+      const loadFuturePlans = (child: Child) => {
+        if (!futureLoads.has(child.id!)) {
+          futureLoads.set(child.id!, getMonthlyTreeCommunications(child.id!, selectedOfficeId, targetMonth)
+            .then(snap => collectOfficeFuturePlans(attendanceRecords, snap.docs.map(d => ({id: d.id, data: d.data()})),
+              child, selectedOfficeId, targetMonth, attendanceByChild.get(child.id!) || new Set())));
+        }
+        return futureLoads.get(child.id!)!;
+      };
 
       try {
-        const [plansSnap, dailySnap] = await Promise.all([
+        const [plansSnap, dailySnap, legacyAttendance, scopedAttendance] = await Promise.all([
           getDocs(query(collection(db, 'supportPlans'), where('month', '==', targetMonth))),
-          getDocs(query(collection(db, 'daily_reports'), where('planMonth', '==', targetMonth)))
+          getDocs(query(collection(db, 'daily_reports'), where('planMonth', '==', targetMonth))),
+          getDocs(query(collection(db, 'reports'), where(documentId(), '>=', `${targetMonth}-01`), where(documentId(), '<=', `${targetMonth}-31`))),
+          getDocs(query(collection(db, 'reports'), where(documentId(), '>=', `${selectedOfficeId}_${targetMonth}-01`), where(documentId(), '<=', `${selectedOfficeId}_${targetMonth}-31`))),
         ]);
+        attendanceRecords = [...legacyAttendance.docs, ...scopedAttendance.docs].map(d => ({id: d.id, data: d.data()}));
+        for (const [id, child] of childrenById) attendanceByChild.set(id, officeAttendanceDates(attendanceRecords, child, selectedOfficeId, targetMonth));
 
         plansSnap.forEach(d => {
           const data = d.data();
-          if (data.childId && data.goals) {
-            goalsMap.set(data.childId, data.goals);
-          }
+          const child = childrenById.get(data.childId);
+          if (!child) return;
+          const priority = excelExportOfficePriority(data, d.id, child, selectedOfficeId, targetMonth);
+          if (!priority || priority <= (goalPriorities.get(data.childId) || 0)) return;
+          goalsMap.set(data.childId, data.goals || '');
+          goalPriorities.set(data.childId, priority);
         });
 
         dailySnap.forEach(d => {
           const dData = d.data();
-          if (dData.childId) {
+          const child = childrenById.get(dData.childId);
+          const dateKey = supportDateKey(dData.date, targetMonth);
+          if (child && dateKey && attendanceByChild.get(child.id!)?.has(dateKey) && excelExportOfficePriority(dData, d.id, child, selectedOfficeId, targetMonth)) {
             if (!dailyMap.has(dData.childId)) {
               dailyMap.set(dData.childId, []);
             }
             dailyMap.get(dData.childId)!.push({
               id: d.id,
               ...dData,
-              date: dData.date || '',
+              date: dateKey,
               content: dData.content || {}
             } as DailyReport);
           }
@@ -200,7 +258,8 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
           });
         });
       } catch (err) {
-        console.warn('Batch fetch error for targetMonth:', err);
+        console.error('Batch fetch error for targetMonth:', err);
+        throw new Error('対象事業所の記録を取得できませんでした。ファイルは変更していません。もう一度お試しください。');
       }
 
       // 各ファイルを高速スキャン
@@ -276,15 +335,20 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
           if (matched && matched.id) {
             goals = goalsMap.get(matched.id) || '';
             dailyRows = dailyMap.get(matched.id) || [];
+            dailyRows = supplementSupportFutureRows(dailyRows, await loadFuturePlans(matched), attendanceByChild.get(matched.id) || new Set(), matched.id, targetMonth);
+            existingExcelRows(dailyRows, targetMonth);
 
             // マップになかった場合の個別フォールバック
-            if (!goals) {
+            if (!goalsMap.has(matched.id)) {
               try {
-                const pDoc = await getDoc(doc(db, 'supportPlans', `${matched.id}_${targetMonth}`));
-                if (pDoc.exists()) {
-                  goals = pDoc.data().goals || '';
+                for (const id of [`${selectedOfficeId}_${matched.id}_${targetMonth}`, `${matched.id}_${targetMonth}`]) {
+                  const pDoc = await getDoc(doc(db, 'supportPlans', id));
+                  if (pDoc.exists() && excelExportOfficePriority(pDoc.data(), id, matched, selectedOfficeId, targetMonth)) {
+                    goals = pDoc.data().goals || '';
+                    break;
+                  }
                 }
-              } catch (e) {}
+              } catch (e) { throw new Error('対象事業所の目標を取得できませんでした。'); }
             }
           }
 
@@ -309,20 +373,31 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
           });
         } catch (err: any) {
           console.warn(`File scan error for ${fileHandle.name}:`, err);
+          items.push({fileHandle, fileName: fileHandle.name, matchedChild: null, hasTemplateSheet: false,
+            targetSheetName: baseSheetName, existingSheetNames: [], goals: '', dailyRows: [], hasData: false,
+            status: 'error', errorMessage: err.message || String(err), selected: false});
         }
       }
 
       setLogs(prev => [...prev, `✔ ${items.length}件のファイルを照合完了しました。事前プレビューを表示します。`]);
       setScannedItems(items);
+      setScanContext({...exportContext, directoryHandle: dirHandle});
       setIsScanning(false);
       setIsModalOpen(true);
       setIsFinished(false);
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        alert(`フォルダ選択でエラーが発生しました: ${err.message || err}`);
-      }
+      console.warn('Excel folder selection/scan failed:', err);
+      setFolderMessage(err.name === 'AbortError' ? 'フォルダの読み取り許可を確認できませんでした。選択の中断や、ブラウザによるアクセス拒否で起こります。選択してもこの表示になる場合は、ChromeまたはEdgeで同じ画面を開いてお試しください。' : `処理できませんでした: ${err.message || err}`);
       setIsScanning(false);
+    } finally {
+      setIsPicking(false);
     }
+  };
+
+  const handleFolderInput = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (files.length) void handleSelectFolder(files);
   };
 
   // 全選択・全解除
@@ -342,6 +417,11 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
 
   // 一括上書きの実行
   const handleExecuteBatch = async () => {
+    if (isProcessing) return;
+    if (!scanContext || scanContext.key !== settingsKey || loadedSettingsKey !== settingsKey) {
+      alert('対象の事業所または年月が変わりました。フォルダを選び直してください。');
+      return;
+    }
     const targets = scannedItems.filter(item => item.selected && item.matchedChild);
     if (targets.length === 0) {
       alert('上書き対象として選択されたファイルがありません。');
@@ -349,11 +429,25 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
     }
 
     setIsProcessing(true);
+    if (!downloadMode) {
+      try {
+        // ユーザー操作直後に要求する。データ取得やファイル処理の後では許可を求められない。
+        const permission = await scanContext.directoryHandle?.requestPermission({mode: 'readwrite'});
+        if (permission !== 'granted') {
+          throw new Error('フォルダへの書き込みが許可されませんでした。ファイルは変更していません。ChromeまたはEdgeで開き、書き込みを許可してから再実行してください。');
+        }
+      } catch (err: any) {
+        setLogs([`上書きを開始できませんでした: ${err.message || err}`]);
+        setIsProcessing(false);
+        return;
+      }
+    }
     setIsFinished(false);
     setLogs([`🚀 一括上書きを開始します（対象: ${targets.length} 件）...`]);
 
     let successCount = 0;
     let errorCount = 0;
+    const zip = downloadMode ? new JSZip() : null;
 
     for (let i = 0; i < targets.length; i++) {
       const item = targets[i];
@@ -363,17 +457,23 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
         setLogs(prev => [...prev, `▶ [${i + 1}/${targets.length}] 「${item.fileName}」(${item.matchedChild?.fullName}様) を処理中...`]);
 
         const result = await cloneTemplateAndWriteExcelFile(
-          item.fileHandle,
+          zip ? {
+            getFile: () => item.fileHandle.getFile(),
+            createWritable: async () => ({
+              write: async (buffer: Uint8Array) => { zip.file(item.fileName, buffer); },
+              close: async () => {}
+            })
+          } : item.fileHandle,
           item.matchedChild?.fullName || '',
           targetMonth,
           item.goals,
           item.dailyRows,
-          monthSettings.creator,
-          monthSettings.createdDateText,
+          scanContext.creator,
+          scanContext.createdDateText,
           (msg) => setLogs(prev => [...prev, `   ${msg}`])
         );
 
-        setLogs(prev => [...prev, `✔ 「${item.fileName}」にシート「${result.sheetName}」を作成・上書き保存しました`]);
+        setLogs(prev => [...prev, `✔ 「${item.fileName}」にシート「${result.sheetName}」を作成${zip ? 'しました（ZIPに追加）' : '・上書き保存しました'}`]);
         successCount++;
 
         setScannedItems(prev => prev.map(si => si.fileName === item.fileName ? { ...si, status: 'success' } : si));
@@ -386,6 +486,23 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
       }
     }
 
+    if (zip && successCount) {
+      try {
+        const blob = await zip.generateAsync({type: 'blob'});
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `専門的支援実施計画_${selectedOfficeId}_${targetMonth}.zip`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      } catch (err: any) {
+        setLogs(prev => [...prev, `ZIPの保存に失敗しました: ${err.message || err}。再実行してください。`]);
+        setIsProcessing(false);
+        return;
+      }
+    }
     setIsProcessing(false);
     setIsFinished(true);
     setLogs(prev => [
@@ -398,85 +515,27 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
   const selectedCount = useMemo(() => scannedItems.filter(i => i.selected).length, [scannedItems]);
 
   return (
-    <div className="p-8 flex flex-col gap-6">
-      {/* 説明カード */}
-      <div className="bg-gradient-to-br from-indigo-50/70 to-blue-50/40 rounded-2xl p-6 border border-indigo-100 shadow-sm">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-indigo-200">
-            <Layers size={24} />
-          </div>
-          <div className="flex-1 space-y-2">
-            <h2 className="text-lg font-bold text-slate-800">
-              月別エクセル一括上書き（原本シート複製 ➜ 新月シート自動作成）
-            </h2>
-            <p className="text-sm text-slate-600 leading-relaxed">
-              エクセルが入ったフォルダを指定するだけで、フォルダ内の全児童のエクセルを自動照合します。
-              各エクセルの<strong className="text-indigo-900 font-bold">「原本」シートを末尾に完全コピー</strong>し、
-              指定した月（例: <span className="font-mono font-bold bg-indigo-100/70 text-indigo-900 px-1.5 py-0.5 rounded">{targetMonth.replace('-', '')}</span>）という名前の新しいシートを作成して、
-              今月の目標・療育内容・結果・予定・作成者を綺麗に流し込みます。
-            </p>
-            <div className="flex flex-wrap items-center gap-4 text-xs font-semibold text-indigo-800 pt-1">
-              <span>✔ 原本の罫線・スタイルを100%完全維持</span>
-              <span>✔ 同名シートが存在する場合は （B） と自動付番</span>
-              <span>✔ 過去月のシートは一切汚さず安全保持</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 条件指定とアクション */}
-      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-6">
-        <div className="flex flex-wrap items-center gap-6 w-full sm:w-auto">
-          {/* 月選択 */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-bold text-slate-500 block">対象年月</label>
-            <input
-              type="month"
-              value={targetMonth}
-              onChange={(e) => setTargetMonth(e.target.value)}
-              className="bg-slate-50 border border-slate-300 rounded-xl px-4 py-2.5 text-base font-bold text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all cursor-pointer"
-            />
-          </div>
-
-          {/* プレビュー表示用シート名目安 */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-bold text-slate-500 block">作成されるシート名</label>
-            <div className="px-4 py-2.5 rounded-xl bg-slate-100 border border-slate-200 text-sm font-mono font-bold text-slate-700">
-              {targetMonth.replace('-', '')}
-            </div>
-          </div>
-
-          {/* システム設定からの参照情報（作成日・作成者） */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-bold text-slate-500 block">参照する作成日・作成者（システム設定）</label>
-            <div className="px-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-medium text-slate-700 flex items-center gap-2">
-              <span>作成日: <strong className="text-indigo-900">{monthSettings.createdDateText || '（未設定）'}</strong></span>
-              <span className="text-slate-300">|</span>
-              <span>作成者: <strong className="text-indigo-900">{monthSettings.creator || '（未設定）'}</strong></span>
-            </div>
-          </div>
-        </div>
-
-        {/* フォルダ選択ボタン */}
-        <button
-          type="button"
-          onClick={handleSelectFolder}
-          disabled={isScanning}
-          className="w-full sm:w-auto flex items-center justify-center gap-2.5 px-6 py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-lg shadow-indigo-600/20 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
-        >
-          {isScanning ? (
-            <>
-              <Loader2 size={20} className="animate-spin" />
-              <span>フォルダを高速解析中... ({scanProgress.current}/{scanProgress.total})</span>
-            </>
-          ) : (
-            <>
-              <FolderOpen size={20} />
-              <span>フォルダを選択して一括上書きを開始</span>
-            </>
-          )}
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+      <SettingsFeature title="Excel一括上書き" direction="アプリ → Excel"
+        description="児童のExcelファイルが入ったフォルダを選び、対象月のデータをExcelに書き出します。"
+        details={['児童名・ふりがなを使って、対象の児童を照合します。', '「原本」シートを複製し、対象月のシートを作成します。', '同じ名前のシートがある場合は別名で作成し、過去のシートは残します。']} />
+      <SettingsGroup title="対象と設定">
+        <label className={settingsRowClass}><span>対象年月</span><input type="month" value={targetMonth} onChange={e => setTargetMonth(e.target.value)} className="min-w-0 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" /></label>
+        <div className={settingsRowClass}><span>作成するシート名</span><span className="text-right text-slate-500">{targetMonth.replace('-', '')}</span></div>
+        <div className={settingsRowClass}><span>作成者</span><span className="text-right text-slate-500">{monthSettings.creator || '未設定'}</span></div>
+        <div className={settingsRowClass}><span>作成日</span><span className="text-right text-slate-500">{monthSettings.createdDateText || '未設定'}</span></div>
+      </SettingsGroup>
+      <SettingsGroup title="ファイルの選択">
+        <input ref={folderInputRef} type="file" multiple {...{webkitdirectory: ''}} className="hidden" onChange={handleFolderInput} aria-label="Excelファイルのフォルダ" />
+        <div className="space-y-3 px-4 py-4"><button type="button" onClick={() => void handleSelectFolder()} disabled={isPicking || isScanning || loadedSettingsKey !== settingsKey} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">
+          {isScanning ? <><Loader2 size={18} className="animate-spin" /><span>フォルダを確認中… ({scanProgress.current}/{scanProgress.total})</span></> : isPicking ? <><Loader2 size={18} className="animate-spin" /><span>フォルダの選択を待っています…</span></> : <><FolderOpen size={18} /><span>既存Excelへ直接上書き（フォルダを選択）</span></>}
         </button>
-      </div>
+          <button type="button" onClick={() => folderInputRef.current?.click()} disabled={isScanning || loadedSettingsKey !== settingsKey} className="text-xs text-slate-600 underline disabled:opacity-50">別ファイルとしてZIP保存する場合はこちら</button>
+          {folderMessage && <p role="alert" className="text-xs text-rose-600">{folderMessage}</p>}
+        </div>
+      </SettingsGroup>
+
+      <OneTimeExcelDateRepair key={selectedOfficeId} officeId={selectedOfficeId} />
 
       {/* スキャン中のプログレスバー表示 */}
       {isScanning && (
@@ -523,8 +582,7 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
       </div>
 
       {/* 照合確認モーダル（createPortal で document.body に直接マウントし、親コンテナの overflow-hidden によるボタン欠落を完全防止） */}
-      {isModalOpen && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 animate-fade-in">
+      {isModalOpen && <ViewportModal className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 animate-fade-in">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[88vh] flex flex-col overflow-hidden border border-slate-100">
             {/* モーダルヘッダー */}
             <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between shrink-0">
@@ -554,7 +612,7 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
                     className="hidden sm:flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md shadow-emerald-600/20 active:scale-95 transition-all cursor-pointer"
                   >
                     <Check size={16} className="stroke-[3]" />
-                    <span>一括書き込みを開始 ({selectedCount}件)</span>
+                    <span>{downloadMode ? 'ZIPを作成して保存' : '一括書き込みを開始'} ({selectedCount}件)</span>
                   </button>
                 )}
                 {!isProcessing && (
@@ -594,6 +652,7 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
                 </div>
               </div>
 
+              {downloadMode && <p className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-900">更新したExcelをZIPで保存します。元のファイルは変更しません。</p>}
               {/* 上書き仕様インフォバー */}
               <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-indigo-900">
                 <div className="flex flex-wrap items-center gap-3">
@@ -755,15 +814,13 @@ export const BatchExcelExport: React.FC<BatchExcelExportProps> = ({
                 ) : (
                   <>
                     <Check size={18} className="stroke-[3]" />
-                    <span>選択した {selectedCount} 件のエクセルに一括書き込みを実行</span>
+                    <span>{downloadMode ? `選択した ${selectedCount} 件をZIPで保存` : `選択した ${selectedCount} 件のエクセルに一括書き込みを実行`}</span>
                   </>
                 )}
               </button>
             </div>
           </div>
-        </div>,
-        document.body
-      )}
+        </ViewportModal>}
     </div>
   );
 };

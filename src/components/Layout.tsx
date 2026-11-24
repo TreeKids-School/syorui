@@ -1,42 +1,25 @@
-import React, { useState, useEffect } from 'react';
-import { Sidebar } from './Sidebar';
+import React, { useEffect, useState } from 'react';
+import type {SummaryChildOrder} from '../lib/summaryChildOrder';
+import {japanDateKey} from '../lib/summaryChildOrder';
 import { MobileNavigation } from './MobileNavigation';
-import { ChildDrawer } from './ChildDrawer';
-import { useParams, Outlet, useLocation } from 'react-router-dom';
-import { cn } from '../lib/utils';
+import { Outlet, useLocation } from 'react-router-dom';
 import type { Child } from '../data/mockData';
 
 type LayoutProps = {
   childrenData: Child[];
   selectedOfficeId: string;
-  offices: { id: string, name: string }[];
-  onOfficeChange: (id: string) => void;
 };
 
 export const Layout: React.FC<LayoutProps> = ({ 
   childrenData, 
-  selectedOfficeId, 
-  offices, 
-  onOfficeChange 
+  selectedOfficeId
 }) => {
-  const { childId } = useParams();
+  const [childOrder, setChildOrder] = useState<SummaryChildOrder>('today');
+  const [visibleMobileChildren, setVisibleMobileChildren] = useState<{scope: string; ids: string[]} | null>(null);
   const location = useLocation();
-  const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-
-  // ドロワーが実際に開いているモバイル画面のときだけ背面をロック
-  const isLocked = isDrawerOpen && window.innerWidth < 768;
-
-  useEffect(() => {
-    // 書類編集画面（dashboard以外の詳細画面）に遷移したらサイドバーを閉じる
-    const isDocumentPage = location.pathname.includes('/support-plan') ||
-                           location.pathname.includes('/assessment') ||
-                           location.pathname.includes('/force-sheet');
-    if (isDocumentPage && window.innerWidth >= 768) {
-      setIsSidebarExpanded(false);
-    }
-  }, [location.pathname]);
-
+  const mobileSearchChildren = location.pathname === '/' && childOrder === 'today'
+    ? childrenData.filter(child => visibleMobileChildren?.scope === `${selectedOfficeId}:${japanDateKey()}` && visibleMobileChildren.ids.includes(child.id || ''))
+    : childrenData;
   useEffect(() => {
     return () => {
       document.body.classList.remove('overflow-hidden', 'touch-none');
@@ -47,55 +30,21 @@ export const Layout: React.FC<LayoutProps> = ({
 
   return (
     <div className="flex h-[100dvh] overflow-hidden relative">
-      <Sidebar
-        childrenData={childrenData}
-        selectedChildId={childId ?? null}
-        isExpanded={isSidebarExpanded}
-        onToggle={() => setIsSidebarExpanded(!isSidebarExpanded)}
-        selectedOfficeId={selectedOfficeId}
-        offices={offices}
-        onOfficeChange={onOfficeChange}
-      />
-
       <main
-        className={`flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden ml-0 ${isSidebarExpanded ? 'md:ml-sidebar-expanded' : 'md:ml-sidebar-collapsed'} transition-[margin] duration-normal relative`}
+        className={`flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden relative`}
       >
-        {isLocked && (
-          <div
-            className="fixed inset-0 z-40 bg-black/5 md:hidden touch-none"
-            onClick={() => setIsDrawerOpen(false)}
-          />
-        )}
-
         {/* スクロールコンテナ
-            - pb-20 md:pb-5: モバイル底部ナビ分の余白を確保しつつ画面を広く活用 */}
+            - モバイル底部の検索とセーフエリア分の余白を確保 */}
         <div
-          className={cn(
-            'flex-1 overflow-y-auto min-h-0 p-3 md:p-5 pb-20 md:pb-5 transition-all',
-            isLocked ? 'overflow-hidden touch-none brightness-95' : ''
-          )}
+          className={`mobile-page-content flex-1 overflow-y-auto min-h-0 p-3 md:p-5 pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-5 transition-all ${location.pathname==='/monthly-summary'?'summary-mobile-content':''}`}
           style={{ overscrollBehavior: 'contain' }}
         >
-          <Outlet />
+          <Outlet context={{childOrder, setChildOrder, setVisibleMobileChildren}} />
         </div>
       </main>
 
       {/* 下部ナビゲーション（モバイルのみ） */}
-      <MobileNavigation
-        childrenData={childrenData}
-        isSheetOpen={isDrawerOpen}
-        onOpenChange={(open) => setIsDrawerOpen(open)}
-      />
-
-      <ChildDrawer
-        isOpen={isDrawerOpen}
-        onClose={() => setIsDrawerOpen(false)}
-        childrenData={childrenData}
-        selectedChildId={childId ?? null}
-        selectedOfficeId={selectedOfficeId}
-        offices={offices}
-        onOfficeChange={onOfficeChange}
-      />
+      <MobileNavigation childrenData={mobileSearchChildren} childOrder={childOrder} onChildOrderChange={setChildOrder} showSort={location.pathname === '/'} />
     </div>
   );
 };

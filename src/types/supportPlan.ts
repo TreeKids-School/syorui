@@ -2,6 +2,7 @@ import { Timestamp } from 'firebase/firestore';
 
 // ---- 各日の支援記録（daily_reports コレクション） ----
 export interface DailyReport {
+  localKey?: string;     // 画面内の行識別用。保存中の編集を維持するために使用し、DBには書き込まない。
   id?: string;           // Firestore document ID（ローカル管理用、ドキュメント本文には不要）
   childId: string;       // children コレクションのドキュメントID
   planMonth: string;     // 対象年月 "YYYY-MM"（グルーピング用）
@@ -25,7 +26,7 @@ export interface DailyReport {
 export interface SupportPlanMeta {
   childId: string;
   month: string;         // 現在表示中の対象年月 "YYYY-MM"
-  selectedProfPlanId?: string; // 選択された反映元の専門的支援計画書ID
+  selectedProfPlanId?: string; // 選択された反映元の個別支援計画書ID
   goals: string;         // 支援目標
   author: string;        // 作成者
   createdAt: string;

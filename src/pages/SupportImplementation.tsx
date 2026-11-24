@@ -1,29 +1,58 @@
+import {createPortal} from 'react-dom';
+import {measureReads} from '../lib/readDiagnostics';
+import {appendDocumentAudit} from '../lib/documentAudit';
+import {DocumentTransferModal} from '../components/DocumentTransferModal';
+import {BatchExcelImport} from '../components/BatchExcelImport';
+import {ImplementationAuthorSettings} from '../components/ImplementationAuthorSettings';
+import {supportGoalText} from '../lib/supportGoalText';
+import {ChildSwitcher} from '../components/ChildSwitcher';
+import {supportGoalPlan, supportGoalPlanMonth} from '../lib/supportGoalPlan';
+import {DocumentTypeSelect} from '../components/DocumentTypeSelect';
+import {MonthPicker} from '../components/ui/MonthPicker';
+import {ViewportModal} from '../components/ViewportModal';
+import {SupportChangeHistory} from '../components/SupportChangeHistory';
+import {describeSupportChanges} from '../lib/supportChangeHistory';
+import type {SupportSnapshot} from '../lib/supportChangeHistory';
+import {StaffAccountContext} from '../components/StaffAccountBadge';
+import {createLatestSaveQueue, mergeSavedSupportIds, supportDraftSignature, supportRowDeletions} from '../lib/supportSaveQueue';
+import {SupportImplementationPrintSettings} from '../components/SupportImplementationPrintSettings';
+import {prepareSupportPrintRows} from '../lib/supportImplementationPrint';
+import { getMonthlySettings } from '../lib/monthlySettings';
+import {matchesOffice} from '../lib/officeUtils';
+import {excelExportOfficePriority} from '../lib/excelExportOfficeScope';
+import {isEmptyNewSupportRecord, needsNewsletterReview} from '../lib/supportRecordReview';
+import {officeAttendanceDates, filterOfficeAttendanceRows, supportDateKey} from '../lib/supportOfficeAttendance';
+import {collectOfficeFuturePlans, resolveSupportFuturePlan} from '../lib/supportFuturePlans';
+import {getMonthlyTreeCommunications,invalidateMonthlyTreeCommunications} from '../lib/monthlyTreeCommunications';
+import {describeReadError} from '../lib/readError';
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Archive, RefreshCw,
-  Save, User as UserIcon, Target, Calendar, ChevronRight,
-  Loader2, Printer, Download,
-  ChevronLeft, Trash2, X, Check, UploadCloud, Copy, AlertTriangle, Sparkles, Eye, EyeOff, FileSpreadsheet, Edit3,
+  Target,
+  Loader2,
+  X, Check, Copy, AlertTriangle,
   Undo2, Redo2
 } from 'lucide-react';
 import { SupportImplementationRow } from './SupportImplementationRow';
-import { DailyReportImportModal } from '../components/DailyReportImportModal';
 import { ResultImportModal } from '../components/ResultImportModal';
 import { parseGoalsText } from '../lib/utils';
 import { performUndo, performRedo, type ImportHistoryAction } from '../lib/importHistory';
 import {
-  doc, getDoc, getDocs, setDoc, writeBatch,
+  doc, getDoc as firestoregetDoc, getDocs as firestoregetDocs, writeBatch,
   collection, query, where, documentId,
   serverTimestamp
 } from 'firebase/firestore';
+const getDocs=measureReads('専門的支援実施計画',firestoregetDocs);
+const getDoc=measureReads('専門的支援実施計画',firestoregetDoc);
+
 import { db, auth } from '../lib/firebase';
 import { convertToResult, GeminiApiError } from '../lib/aiConvert';
 import type { Child } from '../data/mockData';
 import type { DailyReport, SupportPlanMeta } from '../types/supportPlan';
 import type { ProfessionalPlanDoc } from '../types/professionalPlan';
-import { exportSupportImplementation, exportToExistingExcel, overwriteExistingExcelFile } from '../lib/excelExport';
-import { FloatingActionMenu, type Action } from '../components/FloatingActionMenu';
+import { overwriteExistingExcelFile } from '../lib/excelExport';
+import {SupportImplementationToolbar} from '../components/SupportImplementationToolbar';
 
 const PLAN_COL = 'supportPlans';
 const PROF_PLAN_COL = 'professionalPlans';
@@ -55,32 +84,61 @@ export const SupportImplementation: React.FC<SupportImplementationProps> = ({ ch
   const currentMonth = urlMonth || new Date().toISOString().slice(0, 7);
 
   const [planMeta, setPlanMeta] = useState<SupportPlanMeta | null>(null);
-  const [profPlan, setProfPlan] = useState<ProfessionalPlanDoc | null>(null);
-  const [rows, setRows] = useState<DailyReport[]>([]);
+  const [rows, setRowsState] = useState<DailyReport[]>([]);
+  const nextLocalRowKey = React.useRef(0);
+  const setRows = useCallback((update: React.SetStateAction<DailyReport[]>) => {
+    setRowsState(previous => {
+      const next = typeof update === 'function' ? update(previous) : update;
+      return next.some(row => !row.localKey) ? next.map(row => row.localKey ? row : {...row, localKey: row.id || `draft-${++nextLocalRowKey.current}`}) : next;
+    });
+  }, []);
+  const saveQueue = React.useRef(createLatestSaveQueue());
+  const assignedSaveIds = React.useRef(new Map<string, string>());
+  const lastSavedDraft = React.useRef('');
+  const saveGeneration = React.useRef(0);
+  const [officeAttendanceDateKeys, setOfficeAttendanceDateKeys] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
+  const [mobileHeaderSlot,setMobileHeaderSlot]=useState<HTMLElement|null>(null);
+  useEffect(()=>{setMobileHeaderSlot(document.getElementById('mobile-summary-header-slot'));},[]);
   const [newsletters, setNewsletters] = useState<Record<string, string>>({});
   const [futurePlans, setFuturePlans] = useState<Record<string, string>>({});
   const [isConverting, setIsConverting] = useState(false);
   // 日付編集中の行インデックス (null = 全行ロック)
   const [editingDateIdx, setEditingDateIdx] = useState<number | null>(null);
-  const [isNewsletterCollapsed, setIsNewsletterCollapsed] = useState(true);
-  const [isSelectionMode, setIsSelectionMode] = useState(false);
-  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
+  const isNewsletterCollapsed = false;
   const [monthlySettings, setMonthlySettings] = useState<any>(null);
   const [availableProfPlans, setAvailableProfPlans] = useState<ProfessionalPlanDoc[]>([]);
   const [loginStaffName, setLoginStaffName] = useState<string>("");
   const [loginOfficeId, setLoginOfficeId] = useState<string>("");
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const isInitialLoad = React.useRef(true);
-  const [isImportOpen, setIsImportOpen] = useState(false);
+  const fetchSequence = React.useRef(0);
+  const pendingReadScope = React.useRef('');
+  const loadedScope = React.useRef('');
+  const activeScope = React.useRef('');
+  activeScope.current = `${selectedOfficeId}_${childId}_${currentMonth}`;
+  const latestDraft = React.useRef({scope: activeScope.current, signature: ''});
+  latestDraft.current = {scope: activeScope.current, signature: supportDraftSignature(planMeta, rows)};
+  useEffect(() => {
+    const scope = `${selectedOfficeId}_${childId}_${currentMonth}`;
+    activeScope.current = scope;
+    return () => { if (activeScope.current === scope) activeScope.current = ''; };
+  }, [selectedOfficeId, childId, currentMonth]);
+  const account = React.useContext(StaffAccountContext);
+  const auditBaseline = React.useRef<{scope:string; snapshot:SupportSnapshot} | null>(null);
+  const pendingRowDeletions = React.useRef(new Map<string, Map<string, DailyReport>>());
+  const [deleteTarget, setDeleteTarget] = useState<{scope:string;row:DailyReport}|null>(null);
+  const [transferDirection,setTransferDirection]=useState<'export'|'import'|null>(null);
+  const [excelImportOpen,setExcelImportOpen]=useState(false);
+  const [isAuthorSettingsOpen,setIsAuthorSettingsOpen]=useState(false);
+  const [isChangeHistoryOpen, setIsChangeHistoryOpen] = useState(false);
+  const [isPrintSettingsOpen, setIsPrintSettingsOpen] = useState(false);
   const [isResultImportOpen, setIsResultImportOpen] = useState(false);
-  const [exportLogs, setExportLogs] = useState<string[]>([]);
-  const [isExportLogOpen, setIsExportLogOpen] = useState(false);
+  const [, setExportLogs] = useState<string[]>([]);
   const [isExportSuccessOpen, setIsExportSuccessOpen] = useState(false);
   const [exportSuccessType, setExportSuccessType] = useState<'direct' | 'download'>('direct');
   const [targetFileName, setTargetFileName] = useState('');
-  const [isEditingGoals, setIsEditingGoals] = useState(false);
-  const [isDeleteMenuOpen, setIsDeleteMenuOpen] = useState(false);
+  const [exportSheetName, setExportSheetName] = useState('');
 
   // アンドゥ・リドゥ（Undo / Redo）履歴管理
   const [undoStack, setUndoStack] = useState<ImportHistoryAction[]>([]);
@@ -140,6 +198,15 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
   // ---- データ取得 ----
   const fetchData = useCallback(async () => {
     if (!childId || childrenData.length === 0) return;
+    const scope = `${selectedOfficeId}_${childId}_${currentMonth}`;
+    if (pendingReadScope.current === scope) return;
+    pendingReadScope.current = scope;
+    const sequence = ++fetchSequence.current;
+    const isCurrent = () => sequence === fetchSequence.current && activeScope.current === scope;
+    loadedScope.current = '';
+    isInitialLoad.current = true;
+    setRows([]);
+    setPlanMeta(null);
     console.time(`fetchData-${childId}`);
     setIsLoading(true);
     setRawError(null);
@@ -157,6 +224,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           sName = staffData.name || staffData.fullName || "";
         }
       }
+      if (!isCurrent()) return;
       setLoginOfficeId(officeId);
       setLoginStaffName(sName);
 
@@ -164,7 +232,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       const startPath = `${currentMonth}-01`;
       const endPath = `${currentMonth}-31`;
       
-      const queries = [
+      const queries: Promise<any>[] = [
         getDoc(doc(db, PLAN_COL, docId)),
         getDocs(query(
           collection(db, PROF_PLAN_COL),
@@ -178,7 +246,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           where('planMonth', '==', currentMonth),
           where('officeId', '==', selectedOfficeId)
         )),
-        getDoc(doc(db, 'monthlySettings', currentMonth)),
+        getMonthlySettings(selectedOfficeId, currentMonth),
         // reports (プレフィックスなし)
         getDocs(query(
           collection(db, 'reports'), 
@@ -201,12 +269,12 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       }
 
       // children/{childId}/app_categories/書類管理/tree_communications の取得
-      const treeCommRef = collection(db, 'children', childId, 'app_categories', '書類管理', 'tree_communications');
       queries.push(
-        getDocs(treeCommRef) // 全件ロードに変更（サブコレクションのdocumentId比較エラーを回避）
+        getMonthlyTreeCommunications(childId, selectedOfficeId, currentMonth)
       );
 
       const results = await Promise.all(queries);
+      if (!isCurrent()) return;
       
       const metaSnap = results[0] as any;
       const profDocs = results[1] as any;
@@ -215,16 +283,22 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       const reportSnap1 = results[4] as any;
       const reportSnap2 = officeId ? results[5] as any : null;
       const treeCommSnap = results[results.length - 1] as any;
+      const attendanceDates = selectedChild ? officeAttendanceDates(
+        [...reportSnap1.docs, ...(reportSnap2?.docs || [])].map((d: any) => ({id: d.id, data: d.data()})),
+        selectedChild, selectedOfficeId, currentMonth,
+      ) : new Set<string>();
+      setOfficeAttendanceDateKeys(attendanceDates);
 
       // 計画メタ情報
       let meta: SupportPlanMeta;
-      if (metaSnap.exists()) {
+      if (metaSnap.exists() && selectedChild && excelExportOfficePriority(metaSnap.data(), docId, selectedChild, selectedOfficeId, currentMonth)) {
         meta = metaSnap.data() as SupportPlanMeta;
       } else {
         // フォールバック: プレフィックスなしドキュメントの取得を試行
         const fallbackDocId = `${childId}_${currentMonth}`;
         const fallbackSnap = await getDoc(doc(db, PLAN_COL, fallbackDocId));
-        if (fallbackSnap.exists()) {
+        if (!isCurrent()) return;
+        if (fallbackSnap.exists() && selectedChild && excelExportOfficePriority(fallbackSnap.data(), fallbackDocId, selectedChild, selectedOfficeId, currentMonth)) {
           meta = fallbackSnap.data() as SupportPlanMeta;
         } else {
           meta = { 
@@ -257,7 +331,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       const [yearStr, monthStr] = meta.month.split('-');
       const currentMonthInt = parseInt(monthStr, 10);
       const currentYearInt = parseInt(yearStr, 10);
-      const currentOfficeTag = selectedOfficeId === 'LNrWc8f6G703aUYRZ5e2' ? 'サーチ' : selectedOfficeId === 'nWioUcWXUskreYjmSL8p' ? 'ホーム' : '';
+
 
       const processReportSnap = (snap: any) => {
         if (!snap) return;
@@ -265,6 +339,8 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           const data = d.data();
           const childResult = data.results?.[childId];
           if (childResult) {
+            if (!selectedChild || !excelExportOfficePriority(data, d.id, selectedChild, selectedOfficeId, currentMonth)
+              || ((childResult.officeId || childResult.office) && !excelExportOfficePriority(childResult, d.id, selectedChild, selectedOfficeId, currentMonth))) return;
             const parts = d.id.split('_');
             let docOfficeId: string | null = null;
             let dateStr = d.id;
@@ -274,19 +350,11 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
             }
 
             // 1. 異なる事業所のレポートデータはスキップ
-            if (docOfficeId && docOfficeId !== selectedOfficeId) {
+            if (docOfficeId && !matchesOffice(selectedOfficeId, docOfficeId)) {
               return;
             }
 
             // 2. 複数事業所に所属する場合、事業所プレフィックスがないドキュメントは混同回避のためスキップ
-            const childOfficeTags = selectedChild && Array.isArray(selectedChild.offices)
-              ? selectedChild.offices
-              : selectedChild && typeof selectedChild.offices === 'string'
-                ? [selectedChild.offices]
-                : [];
-            if (childOfficeTags.length > 1 && !docOfficeId) {
-              return;
-            }
 
             const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
             if (match) {
@@ -328,6 +396,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       if (treeCommSnap && !treeCommSnap.empty) {
         treeCommSnap.forEach((d: any) => {
           const data = d.data();
+          if (!selectedChild || !excelExportOfficePriority(data, d.id, selectedChild, selectedOfficeId, currentMonth)) return;
           
           const parts = d.id.split('_');
           let docOfficeId: string | null = null;
@@ -338,26 +407,12 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           }
 
           // 1. 他の事業所のIDプレフィックスならスキップ
-          if (docOfficeId && docOfficeId !== selectedOfficeId) {
+          if (docOfficeId && !matchesOffice(selectedOfficeId, docOfficeId)) {
             return;
           }
           // データ内のofficeId / officeフィールドでのフィルタ
-          if (data.officeId && data.officeId !== selectedOfficeId) {
-            return;
-          }
-          if (data.office && data.office !== currentOfficeTag) {
-            return;
-          }
 
           // 2. 複数所属の児童で、事業所情報が一切無いデータは混同回避のためスキップ
-          const childOfficeTags = selectedChild && Array.isArray(selectedChild.offices)
-            ? selectedChild.offices
-            : selectedChild && typeof selectedChild.offices === 'string'
-              ? [selectedChild.offices]
-              : [];
-          if (childOfficeTags.length > 1 && !docOfficeId && !data.officeId && !data.office) {
-            return;
-          }
 
           const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
           if (match) {
@@ -392,13 +447,22 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           }
         });
       }
+      const canonicalFutures = selectedChild ? collectOfficeFuturePlans(
+        [...reportSnap1.docs, ...(reportSnap2?.docs || [])].map((d: any) => ({id: d.id, data: d.data()})),
+        treeCommSnap.docs.map((d: any) => ({id: d.id, data: d.data()})), selectedChild, selectedOfficeId, currentMonth, attendanceDates,
+      ) : {};
+      for (const date of Object.keys(futurePlanMap)) delete futurePlanMap[date];
+      Object.assign(futurePlanMap, canonicalFutures);
       setNewsletters(newsMap);
       setFuturePlans(futurePlanMap);
+      for (const date of Object.keys(newsMap)) if (!attendanceDates.has(date)) delete newsMap[date];
+      for (const date of Object.keys(futurePlanMap)) if (!attendanceDates.has(date)) delete futurePlanMap[date];
 
       // daily_reports の処理
       const savedRowsGrouped: Record<string, any[]> = {};
       dailySnap.docs.forEach((d: any) => {
         const data = d.data();
+        if (!selectedChild || !excelExportOfficePriority(data, d.id, selectedChild, selectedOfficeId, currentMonth)) return;
         let dateStr = "";
         let dObj: Date | null = null;
 
@@ -461,6 +525,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       const excludedDatesSet = new Set(meta.excludedDates || []);
 
       const targetDates = allDates.filter(d => {
+        if (!attendanceDates.has(d)) return false;
         if (excludedDatesSet.has(d)) return false;
         const m = d.match(/^(\d+)月/);
         return m && (monthNum === 0 || parseInt(m[1]) === monthNum);
@@ -478,12 +543,9 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
         
         if (savedList.length > 0) {
           savedList.forEach(saved => {
-            const externalInfo = saved.content.externalInfo?.trim() 
-              ? saved.content.externalInfo 
-              : (newsMap[date] || "");
-            const futurePlan = saved.content.futurePlan?.trim() 
-              ? saved.content.futurePlan 
-              : (futurePlanMap[date] || "");
+            // 古い保存済み本文は他事業所から複製された可能性があるため再利用しない。
+            const externalInfo = newsMap[date] || "";
+            const futurePlan = resolveSupportFuturePlan(saved.content.futurePlan, futurePlanMap[date]);
             finalRows.push({
               id: saved.id,
               childId,
@@ -525,94 +587,60 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
         }
       });
 
-      // 1行もなければ空行追加
-      if (finalRows.length === 0) {
-        finalRows.push({
-          childId, planMonth: meta.month, date: `${monthNum}月1日`,
-          staffId: "", type: 'tree_report',
-          content: { externalInfo: "", supportContent: [], resultInfo: "", futurePlan: "" },
-          archived: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
-        });
-      }
-
       const active = finalRows.filter(r => !r.archived);
       const archived = finalRows.filter(r => r.archived);
-      setRows([...active, ...archived]);
+      loadedScope.current = scope;
+      const loadedRows = [...active, ...archived].map(row => row.localKey ? row : {...row, localKey: row.id || `draft-${++nextLocalRowKey.current}`});
+      auditBaseline.current = {scope, snapshot:{meta, rows:loadedRows}};
+      lastSavedDraft.current = `${scope}:${supportDraftSignature(meta, loadedRows)}`;
+      setRows(loadedRows);
 
       // ボタンでの個別同期用に newsletters state に登録
       setNewsletters(newsMap);
       setFuturePlans(futurePlanMap);
 
     } catch (e: any) {
+      if (!isCurrent()) return;
       console.error('fetchData error:', e);
-      setRawError(e.message || String(e));
+      setRawError(describeReadError(e));
     } finally {
-      setIsLoading(false);
-      isInitialLoad.current = true; // 初回無視フラグ
+      if (isCurrent()) {
+        setIsLoading(false);
+        isInitialLoad.current = true; // 初回無視フラグ
+        pendingReadScope.current = '';
+      }
       console.timeEnd(`fetchData-${childId}`);
     }
   }, [childId, currentMonth, childrenData.length, selectedOfficeId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // 選択された反映元の専門的支援計画書を動的に決定
-  useEffect(() => {
-    if (!planMeta) return;
-    let latestProf: ProfessionalPlanDoc | null = null;
-    
-    if (availableProfPlans.length > 0) {
-      if (planMeta.selectedProfPlanId && planMeta.selectedProfPlanId !== 'auto') {
-        latestProf = availableProfPlans.find(p => p.id === planMeta.selectedProfPlanId) || null;
-      }
-      
-      if (!latestProf) {
-        // フォールバック（自動選択）
-        const matched = availableProfPlans.find((p: any) => 
-          p.isReflected && 
-          p.reflectedStartMonth && 
-          p.reflectedEndMonth && 
-          currentMonth >= p.reflectedStartMonth && 
-          currentMonth <= p.reflectedEndMonth
-        );
-
-        if (matched) {
-          latestProf = matched;
-        } else {
-          const pastPlans = availableProfPlans.filter((p: any) => {
-            const m = p.startMonth || (p.createdAt ? p.createdAt.slice(0, 7) : "");
-            return m && m <= currentMonth;
-          });
-
-          if (pastPlans.length > 0) {
-            pastPlans.sort((a: any, b: any) => {
-              const aM = a.startMonth || (a.createdAt ? a.createdAt.slice(0, 7) : "");
-              const bM = b.startMonth || (b.createdAt ? b.createdAt.slice(0, 7) : "");
-              return aM.localeCompare(bM);
-            });
-            latestProf = pastPlans[pastPlans.length - 1];
-          }
-        }
-      }
-    }
-    setProfPlan(latestProf);
-  }, [planMeta?.selectedProfPlanId, availableProfPlans, currentMonth]);
+  // Derive immediately when the month changes; do not retain the previous month's source.
+  const profPlan = supportGoalPlan(availableProfPlans, childId || '', currentMonth);
 
   // ---- 保存 ----
-  const handleSave = useCallback(async () => {
-    if (!planMeta || !childId) return;
+  const persistDraft = useCallback(async () => {
+    if (!planMeta || !childId || !selectedOfficeId || loadedScope.current !== `${selectedOfficeId}_${childId}_${currentMonth}`) return;
+    if (planMeta.childId !== childId || planMeta.month !== currentMonth || rows.some(row => row.childId !== childId || row.planMonth !== currentMonth)) return;
+    const scope = `${selectedOfficeId}_${childId}_${currentMonth}`;
+    const signature = supportDraftSignature(planMeta, rows);
+    if (activeScope.current !== scope || lastSavedDraft.current === `${scope}:${signature}`) return;
+    const generation = ++saveGeneration.current;
     setSaveStatus('saving');
     try {
       const docId = selectedOfficeId ? `${selectedOfficeId}_${childId}_${currentMonth}` : `${childId}_${currentMonth}`;
-      await setDoc(doc(db, PLAN_COL, docId), {
+      const batch = writeBatch(db);
+      batch.set(doc(db, PLAN_COL, docId), {
         ...planMeta,
         officeId: selectedOfficeId,
       }, { merge: true });
 
-      const batch = writeBatch(db);
       const updatedRows = [...rows];
 
       for (let i = 0; i < updatedRows.length; i++) {
         const row = updatedRows[i];
+        if (isEmptyNewSupportRecord(row)) continue;
+        if (!officeAttendanceDateKeys.has(supportDateKey(row.date, currentMonth) || '')) continue;
         const [yearStr] = planMeta.month.split('-');
         const mMatch = row.date.match(/(\d+)月/);
         const dMatch = row.date.match(/(\d+)日/);
@@ -638,7 +666,10 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
         };
 
         if (!row.id) {
-          const newDocRef = doc(collection(db, DAILY_COL));
+          const key = `${scope}:${row.localKey}`;
+          let id = assignedSaveIds.current.get(key);
+          if (!id) { id = doc(collection(db, DAILY_COL)).id; assignedSaveIds.current.set(key, id); }
+          const newDocRef = doc(db, DAILY_COL, id);
           payload.createdAt = serverTimestamp();
           batch.set(newDocRef, payload);
           updatedRows[i] = { ...row, id: newDocRef.id };
@@ -647,7 +678,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           batch.update(existingDocRef, payload);
         }
 
-        // B) reports (日次一括レポート) の保存 (プレフィックスなし / あり両方に書き込み)
+        // B) 選択中の事業所の日次一括レポートへ保存
         const reportDoc = {
           results: {
             [childId]: {
@@ -657,15 +688,12 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           updatedAt: new Date().toISOString()
         };
 
-        const reportRefNoPref = doc(db, 'reports', formattedDate);
-        batch.set(reportRefNoPref, reportDoc, { merge: true });
-
-        if (loginOfficeId) {
-          const reportRefPref = doc(db, 'reports', `${loginOfficeId}_${formattedDate}`);
+        if (selectedOfficeId) {
+          const reportRefPref = doc(db, 'reports', `${selectedOfficeId}_${formattedDate}`);
           batch.set(reportRefPref, reportDoc, { merge: true });
         }
 
-        // C) children/{児童ID}/.../tree_communications/ の保存（プレフィックスあり・なし両方に書き込み / フィールド追加）
+        // C) 選択中事業所のツリー通信へ保存
         const childTreeDoc = {
           name: selectedChild?.fullName || "",
           tree_comm_text: row.content.externalInfo || "",
@@ -678,31 +706,45 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           office: selectedOfficeId === 'LNrWc8f6G703aUYRZ5e2' ? 'サーチ' : selectedOfficeId === 'nWioUcWXUskreYjmSL8p' ? 'ホーム' : '',
           updatedAt: new Date().toISOString()
         };
-        const childTreeRefNoPref = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, formattedDate);
-        batch.set(childTreeRefNoPref, childTreeDoc, { merge: true });
-
         const childTreeRefPref = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, `${selectedOfficeId}_${formattedDate}`);
         batch.set(childTreeRefPref, childTreeDoc, { merge: true });
       }
 
+      const deletions = supportRowDeletions(scope, updatedRows, pendingRowDeletions.current.get(scope), assignedSaveIds.current);
+      for (const {id} of deletions) {
+        if (id) batch.delete(doc(db, DAILY_COL, id));
+      }
+      const persistedRows = updatedRows.filter(row => row.id && officeAttendanceDateKeys.has(supportDateKey(row.date,currentMonth)||''));
+      const before = auditBaseline.current?.scope === scope ? auditBaseline.current.snapshot : {meta:null,rows:[]};
+      const changes = describeSupportChanges(before, {meta:planMeta,rows:persistedRows});
+      changes.push(...deletions.map(({row})=>({date:String(row.date),field:'療育記録',action:'削除' as const})));
+      if(changes.length) {
+        const historyRef = doc(collection(db,'offices',selectedOfficeId,'support_change_history',`${childId}_${currentMonth}`,'entries'));
+        appendDocumentAudit(batch,{officeId:selectedOfficeId,book:'implementation',childId,month:currentMonth,documentId:docId},changes);
+        batch.set(historyRef,{actorUid:auth.currentUser?.uid||'',actorName:account.name||loginStaffName||auth.currentUser?.displayName||'名称未登録',actorColor:account.color,createdAt:serverTimestamp(),changes});
+      }
       await batch.commit();
+      invalidateMonthlyTreeCommunications(selectedOfficeId,currentMonth,childId);
+      for (const {key} of deletions) pendingRowDeletions.current.get(scope)?.delete(key);
 
-      // 新規割り当てIDをステートに反映させつつ、その直後の自動保存 useEffect 呼び出しを抑止する
-      isInitialLoad.current = true;
-      setRows(updatedRows);
-
-      setSaveStatus('saved');
+      if (activeScope.current !== scope) return;
+      const savedIds = new Map(updatedRows.filter(row => row.localKey && row.id).map(row => [row.localKey!, row.id!]));
+      setRows(current => mergeSavedSupportIds(current, savedIds));
+      auditBaseline.current = {scope,snapshot:{meta:planMeta,rows:updatedRows}};
+      lastSavedDraft.current = `${scope}:${signature}`;
+      const upToDate = latestDraft.current.scope === scope && latestDraft.current.signature === signature;
+      setSaveStatus(upToDate ? 'saved' : 'idle');
       setTimeout(() => {
-        setSaveStatus(prev => prev === 'saved' ? 'idle' : prev);
+        if (activeScope.current === scope && saveGeneration.current === generation) setSaveStatus(prev => prev === 'saved' ? 'idle' : prev);
       }, 2000);
     } catch (e) {
       console.error("Save error:", e);
+      if (activeScope.current !== scope) return;
       setSaveStatus('error');
-      setTimeout(() => {
-        setSaveStatus(prev => prev === 'error' ? 'idle' : prev);
-      }, 3000);
     }
-  }, [childId, currentMonth, planMeta, rows, loginStaffName, loginOfficeId, selectedChild, selectedOfficeId]);
+  }, [childId, currentMonth, planMeta, rows, loginStaffName, loginOfficeId, selectedChild, selectedOfficeId, officeAttendanceDateKeys, account]);
+
+  const handleSave = useCallback(() => saveQueue.current.run(persistDraft), [persistDraft]);
 
   // ---- 自動保存デバウンス監視 ----
   useEffect(() => {
@@ -713,8 +755,9 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       return;
     }
 
+    if (!planMeta || lastSavedDraft.current === `${activeScope.current}:${supportDraftSignature(planMeta, rows)}`) return;
     const timer = setTimeout(() => {
-      handleSave();
+      void handleSave();
     }, 2000); // 2秒デバウンス
 
     return () => clearTimeout(timer);
@@ -764,56 +807,23 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
   };
 
   // ---- 選択した（または全ての）ツリー通信を日付別でコピー ----
-  const handleCopyTreeCommunications = () => {
-    let targetRows = rows;
-    
-    if (isSelectionMode && selectedRowIds.size > 0) {
-      targetRows = rows.filter(r => selectedRowIds.has(`${childId}_${r.date}`));
-    }
-
-    if (targetRows.length === 0) {
-      alert('コピー対象の行が見つかりません。');
-      return;
-    }
-
+  const getTreeCommunicationsText = () => {
     const [year, month] = currentMonth.split('-');
-    const formattedMonth = `${year}年${parseInt(month, 10)}月`;
-    
-    const parseDateKey = (s: string) => {
-      const m = s.match(/(\d+)月(\d+)日/);
-      return m ? parseInt(m[1]) * 100 + parseInt(m[2]) : 0;
-    };
-
-    const sortedRows = [...targetRows].sort((a, b) => parseDateKey(a.date) - parseDateKey(b.date));
-    
-    let copyText = `【対象月】${formattedMonth}\n\n`;
-    let count = 0;
-
-    sortedRows.forEach(row => {
-      // 療育を行った結果が既に入力されている行はコピー対象外とする
-      const hasResult = !!(row.content?.resultInfo && row.content.resultInfo.trim());
-      if (hasResult) return;
-
-      const content = (row.content?.externalInfo || newsletters[row.date] || '').trim();
-      if (content) {
-        copyText += `■ ${row.date}\n${content}\n\n`;
-        count++;
-      }
-    });
-
-    if (count === 0) {
-      alert('療育結果が未入力のツリー通信がありません。（すべての日の療育結果が入力済みです）');
-      return;
+    const byDate = new Map<string, {date:string; text:string}>();
+    for (const [date, text] of Object.entries(newsletters)) {
+      const key = supportDateKey(date, currentMonth);
+      if (key && officeAttendanceDateKeys.has(key) && text.trim()) byDate.set(key, {date, text:text.trim()});
     }
+    for (const row of rows) {
+      const key = supportDateKey(row.date, currentMonth);
+      const text = row.content?.externalInfo?.trim();
+      if (key && officeAttendanceDateKeys.has(key) && text) byDate.set(key, {date:row.date,text});
+    }
+    const sorted = [...byDate].sort(([a],[b])=>a.localeCompare(b));
+    const count = sorted.length;
+    const copyText = '【対象月】'+year+'年'+parseInt(month,10)+'月\n\n'+sorted.map(([,item])=>'■ '+item.date+'\n'+item.text+'\n').join('\n');
 
-    navigator.clipboard.writeText(copyText.trim() + '\n')
-      .then(() => {
-        alert(`療育結果が未入力の ${count}件 のツリー通信をコピーしました。(児童名は個人情報保護のため除外しています)`);
-      })
-      .catch(err => {
-        console.error('Failed to copy: ', err);
-        alert('コピーに失敗しました。お使いのブラウザの設定をご確認ください。');
-      });
+    return count ? copyText.trim()+'\n' : '';
   };
 
   // ---- Geminiでの変換結果を一括登録 ----
@@ -839,7 +849,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
     });
 
     setRows(updatedRows);
-    alert(`${count}件の日付について療育結果を登録しました。\n(自動保存または「保存する」ボタンで保存されます)`);
+    alert(`${count}件の日付について療育結果を登録しました。\n(自動保存されます)`);
     setIsResultImportOpen(false);
   };
 
@@ -864,6 +874,20 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }]);
+  };
+
+  const confirmDeleteRow = () => {
+    const scope = selectedOfficeId+'_'+childId+'_'+currentMonth;
+    if (!deleteTarget || deleteTarget.scope!==scope) {setDeleteTarget(null);return;}
+    const row = rows.find(item=>item.localKey===deleteTarget.row.localKey);
+    if (!row?.localKey) {setDeleteTarget(null);return;}
+    const requests = pendingRowDeletions.current.get(scope) || new Map<string,DailyReport>();
+    requests.set(row.localKey,row);pendingRowDeletions.current.set(scope,requests);
+    if (!rows.some(item=>item.localKey!==row.localKey && item.date===row.date)) {
+      setPlanMeta(meta=>meta ? {...meta,excludedDates:[...new Set([...(meta.excludedDates||[]),String(row.date)])]} : meta);
+    }
+    setRows(previous=>previous.filter(item=>item.localKey!==row.localKey));
+    setDeleteTarget(null);
   };
 
   const archiveRow = (idx: number) => {
@@ -916,28 +940,19 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
   const toggleSupportContent = (rowIdx: number, option: string) => {
     const currentRow = rows[rowIdx];
     const currentSelected = currentRow.content.supportContent || [];
-    let nextSelected: string[];
 
-    if (currentSelected.includes(option)) {
-      nextSelected = currentSelected.filter(o => o !== option);
-    } else {
-      if (currentSelected.length >= 5) {
-        alert('療育内容は5項目まで選択可能です。');
-        return;
-      }
-      nextSelected = [...currentSelected, option];
+    if (!currentSelected.includes(option) && currentSelected.length >= 5) {
+      alert('療育内容は5項目まで選択可能です。');
+      return;
     }
-    updateRowContent(rowIdx, 'supportContent', nextSelected);
+    setRows(previous => previous.map((row, index) => {
+      if (index !== rowIdx) return row;
+      const selected = row.content.supportContent || [];
+      const next = selected.includes(option) ? selected.filter(value => value !== option)
+        : selected.length < 5 ? [...selected, option] : selected;
+      return {...row, content: {...row.content, supportContent: next}};
+    }));
   };
-
-  const handleMonthChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newMonth = e.target.value;
-    if (newMonth) {
-      navigate(`/children/${childId}/support-plan/${newMonth}`);
-    }
-  };
-
-  useEffect(() => { if (planMeta?.month) fetchData(); }, [planMeta?.month]);
 
   const abortControllerRef = React.useRef<AbortController | null>(null);
 
@@ -1003,78 +1018,10 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
     }
   };
 
-  // ---- 印刷 ----
-  const handlePrint = () => {
-    // アーカイブされていない行で、確認済みでない行があるかチェック
-    const unverifiedRows = rows.filter(r => !r.archived && !r.content.isVerified);
-    
-    if (unverifiedRows.length > 0) {
-      const confirmPrint = window.confirm(
-        `確認が完了していない項目が ${unverifiedRows.length} 件あります。\nそのまま印刷しますか？`
-      );
-      if (!confirmPrint) return;
-    }
+  // 印刷は専用の固定レイアウトとリアルタイムプレビューで行う。
+  const handlePrint = () => setIsPrintSettingsOpen(true);
 
-    document.body.classList.add('print-impl');
-    window.print();
-    window.removeEventListener('afterprint', () => {}); // Cleanup just in case
-    window.addEventListener('afterprint', () => {
-      document.body.classList.remove('print-impl');
-    }, { once: true });
-  };
-
-  const getTargetGoalsText = (): string => {
-    let targetGoals = planMeta?.goals || '';
-    if (profPlan) {
-      const parts = [];
-      
-      // 長期目標・短期目標の複数項目フォーマット用のヘルパー
-      const formatGoalText = (labelText: string, rawText: string | undefined): string | null => {
-        if (!rawText || !rawText.trim()) return null;
-        
-        const items = rawText
-          .split('\n')
-          .map(line => line.trim().replace(/^[・\-\*\s\u30fb]+/g, ''))
-          .filter(line => line.length > 0);
-          
-        if (items.length === 0) return null;
-        
-        let content = '';
-        if (items.length === 1) {
-          content = items[0];
-        } else {
-          const circleNumbers = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
-          content = items.map((item, idx) => {
-            const numPrefix = circleNumbers[idx] || `(${idx + 1})`;
-            return `${numPrefix}${item}`;
-          }).join('');
-        }
-        return `${labelText}：${content}`;
-      };
-
-      const longTerm = formatGoalText('長期目標', profPlan.longTermGoal);
-      if (longTerm) parts.push(longTerm);
-      
-      const shortTerm = formatGoalText('短期目標', profPlan.shortTermGoal);
-      if (shortTerm) parts.push(shortTerm);
-      
-      const rawGoals = (profPlan.supportRows || [])
-        .filter((r: any) => r.supportGoal && r.supportGoal.trim() !== '')
-        .map((r: any) => r.supportGoal.trim().replace(/^[・\-\*\s\u30fb]+/g, ''));
-      
-      if (rawGoals.length > 0) {
-        const circleNumbers = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
-        const formattedList = rawGoals.map((goal: string, idx: number) => {
-          const numPrefix = circleNumbers[idx] || `(${idx + 1})`;
-          return `${numPrefix}${goal}`;
-        }).join('');
-        
-        parts.push(`具体的目標：${formattedList}`);
-      }
-      targetGoals = parts.join('\n');
-    }
-    return targetGoals;
-  };
+  const getTargetGoalsText = (): string => supportGoalText(profPlan, availableProfPlans.length === 0 ? planMeta?.goals || '' : '');
 
   const getExportMeta = () => {
     let dateStr = new Date().toISOString();
@@ -1117,17 +1064,19 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
         if (handle) {
           setSaveStatus('saving');
           setExportLogs([]);
+      setExportSheetName('');
           setTargetFileName(handle.name);
-          await overwriteExistingExcelFile(
+          const result = await overwriteExistingExcelFile(
             handle,
             selectedChild.fullName,
             planMeta.month,
             targetGoals,
-            rows,
+            filterOfficeAttendanceRows(rows, officeAttendanceDateKeys, planMeta.month),
             exportCreator,
             formattedCreatedAt,
             (msg) => setExportLogs(prev => [...prev, msg])
           );
+          setExportSheetName(result.sheetName);
           setSaveStatus('saved');
           setExportSuccessType('direct');
           setIsExportSuccessOpen(true);
@@ -1145,631 +1094,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
         setTimeout(() => setSaveStatus('idle'), 3000);
       }
     } else {
-      const input = document.getElementById('excel-file-direct-fallback') as HTMLInputElement;
-      if (input) {
-        input.click();
-      }
-    }
-  };
-
-  const handleFallbackFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!selectedChild || !planMeta) return;
-    const targetGoals = getTargetGoalsText();
-
-    const fileName = `専門的支援実施計画_${selectedChild.fullName}_${planMeta.month}`;
-    const { exportDate: formattedCreatedAt, exportCreator } = getExportMeta();
-
-    try {
-      setSaveStatus('saving');
-      setExportLogs([]);
-      setTargetFileName(file.name);
-      await exportToExistingExcel(
-        file,
-        selectedChild.fullName,
-        planMeta.month,
-        targetGoals,
-        rows,
-        fileName,
-        exportCreator,
-        formattedCreatedAt,
-        (msg) => setExportLogs(prev => [...prev, msg])
-      );
-      setSaveStatus('saved');
-      setExportSuccessType('download');
-      setIsExportSuccessOpen(true);
-      setTimeout(() => setSaveStatus('idle'), 2000);
-    } catch (err: any) {
-      setExportLogs(prev => [...prev, `エラーが発生しました: ${err.message || err}`]);
-      console.error(err);
-      alert(`既存エクセルへの上書きに失敗しました: ${err.message || err}`);
-      setSaveStatus('error');
-      setTimeout(() => setSaveStatus('idle'), 3000);
-    }
-    e.target.value = '';
-  };
-
-  const handleDownloadFallbackFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!selectedChild || !planMeta) return;
-    const targetGoals = getTargetGoalsText();
-
-    const fileName = `専門的支援実施計画_${selectedChild.fullName}_${planMeta.month}_上書き版`;
-    const { exportDate: formattedCreatedAt, exportCreator } = getExportMeta();
-
-    try {
-      setSaveStatus('saving');
-      setExportLogs([]);
-      setTargetFileName(file.name);
-      await exportToExistingExcel(
-        file,
-        selectedChild.fullName,
-        planMeta.month,
-        targetGoals,
-        rows,
-        fileName,
-        exportCreator,
-        formattedCreatedAt,
-        (msg) => setExportLogs(prev => [...prev, msg])
-      );
-      setSaveStatus('saved');
-      setExportSuccessType('download');
-      setIsExportSuccessOpen(true);
-      setTimeout(() => setSaveStatus('idle'), 2000);
-    } catch (err: any) {
-      setExportLogs(prev => [...prev, `エラーが発生しました: ${err.message || err}`]);
-      console.error(err);
-      alert(`既存エクセルへの上書きダウンロードに失敗しました: ${err.message || err}`);
-      setSaveStatus('error');
-      setTimeout(() => setSaveStatus('idle'), 3000);
-    }
-    e.target.value = '';
-  };
-
-  const handleExcelExport = () => {
-    if (!selectedChild || !planMeta) return;
-
-    // 支援目標のテキスト作成（長期・短期・個別目標を統合）
-    const targetGoals = getTargetGoalsText();
-
-    const fileName = `専門的支援実施計画_${selectedChild.fullName}_${planMeta.month}`;
-    const { exportDate: formattedCreatedAt, exportCreator } = getExportMeta();
-
-    exportSupportImplementation(
-      selectedChild.fullName,
-      planMeta.month,
-      targetGoals,
-      rows,
-      fileName,
-      exportCreator,
-      formattedCreatedAt
-    );
-  };
-
-
-  // ---- 選択モード関連 ----
-  const toggleSelection = (rowId: string) => {
-    setSelectedRowIds(prev => {
-      const next = new Set(prev);
-      if (next.has(rowId)) next.delete(rowId);
-      else next.add(rowId);
-      return next;
-    });
-  };
-
-  // 日付の正規化ヘルパー (例: "4月1日" -> "2026-04-01")
-  const formatDateToIso = (dateStr: string, planMonthStr?: string) => {
-    const match = dateStr.match(/(\d+)月(\d+)日/);
-    if (!match) return null;
-    const targetMonth = planMonthStr || planMeta?.month || currentMonth;
-    const [yearStr] = targetMonth.split('-');
-    const mStr = match[1].padStart(2, '0');
-    const dStr = match[2].padStart(2, '0');
-    return `${yearStr}-${mStr}-${dStr}`;
-  };
-
-  // ---- 1行（その日）の専門的支援記録を完全削除 ----
-  const handleDeleteRow = async (idx: number) => {
-    const targetRow = rows[idx];
-    if (!targetRow || !childId) return;
-
-    if (!window.confirm(`「${targetRow.date}」の専門的支援記録を削除しますか？\n\n・入力済みの療育内容\n・療育を行った結果\n・今後の予定\n\n※この操作は上部の「元に戻す（Ctrl+Z）」で復元可能です。`)) {
-      return;
-    }
-
-    try {
-      setSaveStatus('saving');
-      const formattedDate = formatDateToIso(targetRow.date);
-      const dateKey = formattedDate || "";
-      const prefDocId = selectedOfficeId ? `${selectedOfficeId}_${formattedDate}` : dateKey;
-
-      // IDがない場合は新規生成してスナップショットを確実に紐付け
-      const effectiveId = targetRow.id || doc(collection(db, DAILY_COL)).id;
-      const effectiveRow: DailyReport = {
-        ...targetRow,
-        id: effectiveId,
-        childId: targetRow.childId || childId,
-        planMonth: targetRow.planMonth || planMeta?.month || currentMonth
-      };
-
-      // 削除前のスナップショットを作成（アンドゥ用）
-      const deleteAction: ImportHistoryAction = {
-        id: `delete-row-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        summary: `${targetRow.date}の支援記録削除`,
-        officeId: selectedOfficeId || '',
-        officeName: officeName || '',
-        actionType: 'delete',
-        deletedRows: [effectiveRow],
-        deletedPlanMeta: planMeta ? { ...planMeta } : undefined,
-        before: {
-          supportPlans: planMeta ? [{
-            docId: selectedOfficeId ? `${selectedOfficeId}_${childId}_${planMeta.month}` : `${childId}_${planMeta.month}`,
-            hadExistingGoals: !!(planMeta.goals && planMeta.goals.trim()),
-            goals: planMeta.goals || ""
-          }] : [],
-          dailyReports: [{
-            id: effectiveId,
-            isNew: false,
-            data: effectiveRow
-          }],
-          createdDailyReportIds: [],
-          treeComms: dateKey ? [{
-            childId,
-            dateKey,
-            prefDocId,
-            hadExisting: true,
-            futurePlan: targetRow.content.futurePlan || futurePlans[targetRow.date] || ""
-          }] : []
-        },
-        after: {
-          supportPlans: [],
-          dailyReports: [],
-          treeComms: []
-        }
-      };
-
-      const batch = writeBatch(db);
-
-      // 1. daily_reports のドキュメント削除
-      if (targetRow.id) {
-        batch.delete(doc(db, DAILY_COL, targetRow.id));
-      }
-
-      // 2. tree_communications の future_plan も空文字にして更新
-      if (formattedDate) {
-        const prefRef = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, prefDocId);
-        const noPrefRef = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, formattedDate);
-        batch.set(prefRef, { future_plan: "", updatedAt: new Date().toISOString() }, { merge: true });
-        batch.set(noPrefRef, { future_plan: "", updatedAt: new Date().toISOString() }, { merge: true });
-      }
-
-      // 3. supportPlans の excludedDates に targetRow.date を追加して保存
-      const currentExcluded = new Set(planMeta?.excludedDates || []);
-      currentExcluded.add(targetRow.date);
-      const updatedExcludedDates = Array.from(currentExcluded);
-
-      const targetMonth = planMeta?.month || currentMonth;
-      const newPlanMeta: SupportPlanMeta = {
-        ...(planMeta || {
-          childId: childId,
-          month: targetMonth,
-          goals: "",
-          author: loginStaffName || "スタッフ",
-          createdAt: new Date().toISOString()
-        }),
-        excludedDates: updatedExcludedDates
-      };
-
-      const planDocPref = doc(db, PLAN_COL, `${selectedOfficeId}_${childId}_${targetMonth}`);
-      const planDocNoPref = doc(db, PLAN_COL, `${childId}_${targetMonth}`);
-      batch.set(planDocPref, { ...newPlanMeta, officeId: selectedOfficeId }, { merge: true });
-      batch.set(planDocNoPref, { ...newPlanMeta, officeId: selectedOfficeId }, { merge: true });
-
-      await batch.commit();
-
-      setRecentlyImportedDates(prev => {
-        const next = new Set(prev);
-        next.delete(targetRow.date);
-        return next;
-      });
-
-      // futurePlans state からも該当日の予定を削除
-      setFuturePlans(prev => {
-        const next = { ...prev };
-        delete next[targetRow.date];
-        return next;
-      });
-
-      // 自動保存の誤作動防止フラグを立ててから行をテーブルから完全削除
-      isInitialLoad.current = true;
-      setRows(prev => prev.filter((_, i) => i !== idx));
-      setPlanMeta(newPlanMeta);
-
-      // アンドゥスタックに追加 & トースト通知
-      setUndoStack(prev => [...prev, deleteAction]);
-      setRedoStack([]);
-      setHistoryToast({
-        message: `「${targetRow.date}」の専門的支援記録を削除しました`,
-        type: 'undo',
-        canUndo: true
-      });
-
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1500);
-    } catch (err: any) {
-      console.error("Delete row error:", err);
-      alert(`削除に失敗しました: ${err.message || String(err)}`);
-      setSaveStatus('error');
-      setTimeout(() => setSaveStatus('idle'), 3000);
-    }
-  };
-
-  // ---- 選択した行の一括削除 ----
-  const handleDeleteSelected = async () => {
-    if (selectedRowIds.size === 0 || !childId) return;
-    if (!window.confirm(`選択された${selectedRowIds.size}件の記録を削除しますか？\n（療育内容・結果・今後の予定が削除されます）\n\n※この操作は上部の「元に戻す（Ctrl+Z）」で復元可能です。`)) return;
-
-    try {
-      setSaveStatus('saving');
-
-      // 削除対象行のスナップショット作成（アンドゥ用）
-      const targetRows = rows.filter(r => selectedRowIds.has(`${childId}_${r.date}`));
-      const effectiveDeletedRows = targetRows.map(r => ({
-        ...r,
-        id: r.id || doc(collection(db, DAILY_COL)).id,
-        childId: r.childId || childId,
-        planMonth: r.planMonth || planMeta?.month || currentMonth
-      }));
-
-      const dailySnapshots = effectiveDeletedRows.map(r => ({
-        id: r.id!,
-        isNew: false,
-        data: r
-      }));
-
-      const treeSnapshots = effectiveDeletedRows.map(r => {
-        const formattedDate = formatDateToIso(r.date) || "";
-        return {
-          childId,
-          dateKey: formattedDate,
-          prefDocId: selectedOfficeId ? `${selectedOfficeId}_${formattedDate}` : formattedDate,
-          hadExisting: true,
-          futurePlan: r.content.futurePlan || futurePlans[r.date] || ""
-        };
-      }).filter(t => !!t.dateKey);
-
-      const deleteAction: ImportHistoryAction = {
-        id: `delete-selected-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        summary: `${selectedRowIds.size}件の記録削除`,
-        officeId: selectedOfficeId || '',
-        officeName: officeName || '',
-        actionType: 'delete',
-        deletedPlanMeta: planMeta ? { ...planMeta } : undefined,
-        before: {
-          supportPlans: planMeta ? [{
-            docId: selectedOfficeId ? `${selectedOfficeId}_${childId}_${planMeta.month}` : `${childId}_${planMeta.month}`,
-            hadExistingGoals: !!(planMeta.goals && planMeta.goals.trim()),
-            goals: planMeta.goals || ""
-          }] : [],
-          dailyReports: dailySnapshots,
-          createdDailyReportIds: [],
-          treeComms: treeSnapshots
-        },
-        after: {
-          supportPlans: [],
-          dailyReports: [],
-          treeComms: []
-        }
-      };
-
-      const batch = writeBatch(db);
-
-      // 1. daily_reports のドキュメント削除 & tree_communications の future_plan クリア
-      targetRows.forEach(row => {
-        if (row.id) {
-          batch.delete(doc(db, DAILY_COL, row.id));
-        }
-        const formattedDate = formatDateToIso(row.date);
-        if (formattedDate) {
-          const prefDocId = selectedOfficeId ? `${selectedOfficeId}_${formattedDate}` : formattedDate;
-          const prefRef = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, prefDocId);
-          const noPrefRef = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, formattedDate);
-          batch.set(prefRef, { future_plan: "", updatedAt: new Date().toISOString() }, { merge: true });
-          batch.set(noPrefRef, { future_plan: "", updatedAt: new Date().toISOString() }, { merge: true });
-        }
-      });
-
-      // 2. excludedDates に削除対象の日付をすべて追加
-      const currentExcluded = new Set(planMeta?.excludedDates || []);
-      targetRows.forEach(r => currentExcluded.add(r.date));
-      const updatedExcludedDates = Array.from(currentExcluded);
-
-      const targetMonth = planMeta?.month || currentMonth;
-      const newPlanMeta: SupportPlanMeta = {
-        ...(planMeta || {
-          childId: childId,
-          month: targetMonth,
-          goals: "",
-          author: loginStaffName || "スタッフ",
-          createdAt: new Date().toISOString()
-        }),
-        excludedDates: updatedExcludedDates
-      };
-
-      const planDocPref = doc(db, PLAN_COL, `${selectedOfficeId}_${childId}_${targetMonth}`);
-      const planDocNoPref = doc(db, PLAN_COL, `${childId}_${targetMonth}`);
-      batch.set(planDocPref, { ...newPlanMeta, officeId: selectedOfficeId }, { merge: true });
-      batch.set(planDocNoPref, { ...newPlanMeta, officeId: selectedOfficeId }, { merge: true });
-
-      await batch.commit();
-
-      // futurePlans state からも削除
-      setFuturePlans(prev => {
-        const next = { ...prev };
-        targetRows.forEach(r => delete next[r.date]);
-        return next;
-      });
-
-      isInitialLoad.current = true;
-      setRows(prev => prev.filter(r => !selectedRowIds.has(`${childId}_${r.date}`)));
-      setPlanMeta(newPlanMeta);
-      setSelectedRowIds(new Set());
-      setIsSelectionMode(false);
-
-      // アンドゥスタックに追加 & トースト通知
-      setUndoStack(prev => [...prev, deleteAction]);
-      setRedoStack([]);
-      setHistoryToast({
-        message: `${targetRows.length}件の専門的支援記録を削除しました`,
-        type: 'undo',
-        canUndo: true
-      });
-
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1500);
-    } catch (err: any) {
-      console.error(err);
-      alert(`削除に失敗しました: ${err.message || String(err)}`);
-      setSaveStatus('error');
-      setTimeout(() => setSaveStatus('idle'), 3000);
-    }
-  };
-
-  // ---- その児童のその月を全削除 ----
-  const handleDeleteCurrentMonthAll = async () => {
-    if (!childId || !planMeta) return;
-    const childName = selectedChild?.fullName || "この児童";
-    const targetMonth = planMeta.month || currentMonth;
-
-    const confirmed = window.confirm(
-      `【当月の専門的支援実施計画を全削除】\n\n${childName}様の当月（${targetMonth}）の専門的支援実施計画をすべて削除しますか？\n\n・支援目標（計画メタ情報）\n・当月すべての日の療育記録（内容・結果）\n・当月すべての日の今後の予定\n\n※この操作は上部の「元に戻す（Ctrl+Z）」で復元可能です。`
-    );
-    if (!confirmed) return;
-
-    try {
-      setSaveStatus('saving');
-
-      // 削除前のスナップショットを作成（アンドゥ用）
-      const planDocIdPref = `${selectedOfficeId}_${childId}_${targetMonth}`;
-      const planDocIdNoPref = `${childId}_${targetMonth}`;
-
-      const effectiveDeletedRows = rows.map(r => ({
-        ...r,
-        id: r.id || doc(collection(db, DAILY_COL)).id,
-        childId: r.childId || childId,
-        planMonth: r.planMonth || targetMonth
-      }));
-
-      const dailySnapshots = effectiveDeletedRows.map(r => ({
-        id: r.id!,
-        isNew: false,
-        data: r
-      }));
-
-      const [yearStr, monthStr] = targetMonth.split('-');
-      const daysInMonth = new Date(parseInt(yearStr, 10), parseInt(monthStr, 10), 0).getDate();
-      const treeSnapshots = [];
-      for (let d = 1; d <= daysInMonth; d++) {
-        const dStr = String(d).padStart(2, '0');
-        const formattedDate = `${yearStr}-${monthStr}-${dStr}`;
-        const dateDisplay = `${parseInt(monthStr, 10)}月${d}日`;
-        const existingPlan = futurePlans[dateDisplay] || "";
-        if (existingPlan) {
-          treeSnapshots.push({
-            childId,
-            dateKey: formattedDate,
-            prefDocId: selectedOfficeId ? `${selectedOfficeId}_${formattedDate}` : formattedDate,
-            hadExisting: true,
-            futurePlan: existingPlan
-          });
-        }
-      }
-
-      const deleteAction: ImportHistoryAction = {
-        id: `delete-month-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        summary: `${targetMonth}の計画全削除`,
-        officeId: selectedOfficeId || '',
-        officeName: officeName || '',
-        actionType: 'delete',
-        deletedRows: effectiveDeletedRows,
-        deletedPlanMeta: { ...planMeta },
-        before: {
-          supportPlans: [{
-            docId: selectedOfficeId ? planDocIdPref : planDocIdNoPref,
-            hadExistingGoals: !!(planMeta.goals && planMeta.goals.trim()),
-            goals: planMeta.goals || ""
-          }],
-          dailyReports: dailySnapshots,
-          createdDailyReportIds: [],
-          treeComms: treeSnapshots
-        },
-        after: {
-          supportPlans: [],
-          dailyReports: [],
-          treeComms: []
-        }
-      };
-
-      const batch = writeBatch(db);
-
-      // 1. daily_reports の削除 & tree_communications の future_plan クリア
-      rows.forEach(r => {
-        if (r.id) {
-          batch.delete(doc(db, DAILY_COL, r.id));
-        }
-        const formattedDate = formatDateToIso(r.date);
-        if (formattedDate) {
-          const prefDocId = selectedOfficeId ? `${selectedOfficeId}_${formattedDate}` : formattedDate;
-          const prefRef = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, prefDocId);
-          const noPrefRef = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, formattedDate);
-          batch.set(prefRef, { future_plan: "", updatedAt: new Date().toISOString() }, { merge: true });
-          batch.set(noPrefRef, { future_plan: "", updatedAt: new Date().toISOString() }, { merge: true });
-        }
-      });
-
-      // 2. 当月の全行の日付を excludedDates に登録して supportPlans を更新
-      const allRowDates = Array.from(new Set([...(planMeta?.excludedDates || []), ...rows.map(r => r.date)]));
-      const newPlanMeta: SupportPlanMeta = {
-        childId,
-        month: targetMonth,
-        goals: "",
-        author: loginStaffName || "スタッフ",
-        createdAt: new Date().toISOString(),
-        excludedDates: allRowDates
-      };
-
-      batch.set(doc(db, PLAN_COL, planDocIdPref), { ...newPlanMeta, officeId: selectedOfficeId });
-      batch.set(doc(db, PLAN_COL, planDocIdNoPref), { ...newPlanMeta, officeId: selectedOfficeId });
-
-      await batch.commit();
-
-      isInitialLoad.current = true;
-      setRows([]);
-      setFuturePlans({});
-      setPlanMeta(newPlanMeta);
-      setRecentlyImportedDates(new Set());
-
-      // アンドゥスタックに追加 & トースト通知
-      setUndoStack(prev => [...prev, deleteAction]);
-      setRedoStack([]);
-      setHistoryToast({
-        message: `「${targetMonth}」の専門的支援計画を全削除しました`,
-        type: 'undo',
-        canUndo: true
-      });
-
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1500);
-    } catch (err: any) {
-      console.error("Delete current month error:", err);
-      alert(`削除に失敗しました: ${err.message || String(err)}`);
-      setSaveStatus('error');
-      setTimeout(() => setSaveStatus('idle'), 3000);
-    }
-  };
-
-  // ---- その児童のすべての専門的支援実施計画を全削除 ----
-  const handleDeleteChildAllPlans = async () => {
-    if (!childId) return;
-    const childName = selectedChild?.fullName || "この児童";
-
-    const firstConfirm = window.confirm(
-      `【⚠️ 警告：全期間データ削除】\n\n${childName}様の【すべての月】の専門的支援実施計画をすべて完全に削除しますか？\n\n・全期間の支援目標\n・全期間の日々の療育記録（内容・結果）\n・全期間の今後の予定\n\n※この操作は取り消せません。`
-    );
-    if (!firstConfirm) return;
-
-    const secondConfirm = window.confirm(
-      `本当に${childName}様の全期間のデータをすべて削除してよろしいですか？\n元に戻すことはできません。`
-    );
-    if (!secondConfirm) return;
-
-    try {
-      setSaveStatus('saving');
-
-      // 1. supportPlans コレクションからこの児童の全ドキュメントを削除
-      const plansQuery = query(collection(db, PLAN_COL), where('childId', '==', childId));
-      const plansSnap = await getDocs(plansQuery);
-      const batch1 = writeBatch(db);
-      plansSnap.docs.forEach(d => batch1.delete(d.ref));
-      if (planMeta?.month) {
-        batch1.delete(doc(db, PLAN_COL, `${selectedOfficeId}_${childId}_${planMeta.month}`));
-        batch1.delete(doc(db, PLAN_COL, `${childId}_${planMeta.month}`));
-      }
-      await batch1.commit();
-
-      // 2. daily_reports コレクションからこの児童の全ドキュメントを削除
-      const dailyQuery = query(collection(db, DAILY_COL), where('childId', '==', childId));
-      const dailySnap = await getDocs(dailyQuery);
-      const chunks: any[][] = [];
-      let currentChunk: any[] = [];
-      dailySnap.docs.forEach(d => {
-        currentChunk.push(d.ref);
-        if (currentChunk.length >= 400) {
-          chunks.push(currentChunk);
-          currentChunk = [];
-        }
-      });
-      if (currentChunk.length > 0) chunks.push(currentChunk);
-
-      for (const chunk of chunks) {
-        const b = writeBatch(db);
-        chunk.forEach(ref => b.delete(ref));
-        await b.commit();
-      }
-
-      // 3. tree_communications のデータは他アプリ連携のため一切変更しない
-
-      isInitialLoad.current = true;
-      // ツリー通信または今後の予定がある行は、療育内容・結果のみをクリアしてバーチャル行として残す
-      const remainingRows: DailyReport[] = [];
-      rows.forEach(r => {
-        const hasTreeComm = !!(r.content?.externalInfo?.trim() || newsletters[r.date]?.trim());
-        const hasFuture = !!(futurePlans[r.date]?.trim() || r.content?.futurePlan?.trim());
-        if (hasTreeComm || hasFuture) {
-          remainingRows.push({
-            childId,
-            planMonth: currentMonth,
-            date: r.date,
-            staffId: "",
-            type: 'tree_report',
-            content: {
-              externalInfo: r.content.externalInfo || newsletters[r.date] || "",
-              supportContent: [],
-              resultInfo: "",
-              futurePlan: futurePlans[r.date] || r.content.futurePlan || "",
-              isVerified: false
-            },
-            archived: false,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          });
-        }
-      });
-      setRows(remainingRows);
-      setPlanMeta({
-        childId,
-        month: currentMonth,
-        goals: "",
-        author: loginStaffName || "スタッフ",
-        createdAt: new Date().toISOString()
-      });
-      setRecentlyImportedDates(new Set());
-
-      setSaveStatus('saved');
-      alert(`「${childName}様」のすべての専門的支援実施計画を削除しました。`);
-      setTimeout(() => setSaveStatus('idle'), 1500);
-    } catch (err: any) {
-      console.error("Delete all child plans error:", err);
-      alert(`削除に失敗しました: ${err.message || String(err)}`);
-      setSaveStatus('error');
-      setTimeout(() => setSaveStatus('idle'), 3000);
+      alert('このブラウザではファイルへの直接保存を利用できません。');
     }
   };
 
@@ -1928,7 +1253,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
 
 
 
-  if (isLoading || (childrenData.length === 0 && !selectedChild)) {
+  if (isLoading || (!rawError && loadedScope.current !== activeScope.current) || (childrenData.length === 0 && !selectedChild)) {
     return (
       <div className="p-4 md:p-8 animate-pulse">
         <div className="h-8 w-64 bg-slate-200 rounded mb-8" />
@@ -1963,7 +1288,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
   if (!planMeta) return (
     <div className="p-20 text-center flex flex-col items-center gap-4 glass-panel max-w-md mx-auto mt-20">
       <div className="bg-amber-50 p-4 rounded-lg border border-amber-200 w-full text-left">
-        <p className="text-amber-700 font-bold mb-2">書類データへのアクセスが拒否されました</p>
+        <p className="text-amber-700 font-bold mb-2">書類データを読み込めませんでした</p>
         <div className="text-[10px] text-slate-500 space-y-1">
           <p>ログイン: <span className="font-mono text-amber-800">{auth.currentUser?.email || '未ログイン'}</span></p>
           <p>対象児童ID: <span className="font-mono">{childId}</span></p>
@@ -1972,64 +1297,28 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
               Error: {rawError}
             </div>
           )}
-          <p className="mt-2 text-amber-600">※セキュリティルールとログイン状態の不一致が起きています。</p>
         </div>
       </div>
       <button className="btn-primary w-full" onClick={() => fetchData()}>再試行</button>
     </div>
   );
 
-  const menuActions: Action[] = [
-    ...(undoStack.length > 0 ? [{
-      label: `元に戻す (${undoStack.length})`,
-      icon: <Undo2 size={18} />,
-      onClick: handleUndo,
-      colorClass: 'bg-amber-600 text-white'
-    }] : []),
-    ...(redoStack.length > 0 ? [{
-      label: `やり直す (${redoStack.length})`,
-      icon: <Redo2 size={18} />,
-      onClick: handleRedo,
-      colorClass: 'bg-blue-600 text-white'
-    }] : []),
-    { label: '保存する', icon: <Save size={18} />, onClick: handleSave, colorClass: 'bg-primary text-white' },
-    { 
-      label: isSelectionMode ? (selectedRowIds.size > 0 ? `${selectedRowIds.size}件削除` : '選択解除') : '一括削除モード', 
-      icon: isSelectionMode ? <X size={18} /> : <Trash2 size={18} />, 
-      onClick: isSelectionMode && selectedRowIds.size > 0 ? handleDeleteSelected : () => {
-        setIsSelectionMode(!isSelectionMode);
-        setSelectedRowIds(new Set());
-      },
-      colorClass: isSelectionMode ? 'bg-red-500 text-white' : 'bg-slate-700 text-white'
-    },
-    { label: '当月の計画を全削除', icon: <Trash2 size={18} />, onClick: handleDeleteCurrentMonthAll, colorClass: 'bg-red-600 text-white' },
-    { label: 'この児童の全計画を削除', icon: <AlertTriangle size={18} />, onClick: handleDeleteChildAllPlans, colorClass: 'bg-red-800 text-white' },
-    { 
-      label: isNewsletterCollapsed ? 'ツリー通信を展開' : 'ツリー通信を格納', 
-      icon: isNewsletterCollapsed ? <Eye size={18} /> : <EyeOff size={18} />, 
-      onClick: () => setIsNewsletterCollapsed(!isNewsletterCollapsed), 
-      colorClass: 'bg-orange-500 text-white' 
-    },
-    { label: 'ツリー通信をコピー', icon: <Copy size={18} />, onClick: handleCopyTreeCommunications, colorClass: 'bg-blue-600 text-white' },
-    { label: '結果を一括登録', icon: <Sparkles size={18} />, onClick: () => setIsResultImportOpen(true), colorClass: 'bg-indigo-600 text-white' },
-    { label: '行追加', icon: <Plus size={18} />, onClick: addRow },
-    { label: 'Excelインポート', icon: <UploadCloud size={18} />, onClick: () => setIsImportOpen(true), colorClass: 'bg-emerald-600 text-white' },
-    { label: '既存Excelに直接上書き', icon: <UploadCloud size={18} />, onClick: handleDirectOverwriteExcel, colorClass: 'bg-indigo-600 text-white' },
-    { 
-      label: '既存Excelに上書きしてダウンロード', 
-      icon: <Download size={18} />, 
-      onClick: () => {
-        const input = document.getElementById('excel-file-download-fallback') as HTMLInputElement;
-        if (input) input.click();
-      }, 
-      colorClass: 'bg-slate-700 text-white' 
-    },
-    { label: 'Excel新規出力', icon: <Download size={18} />, onClick: handleExcelExport },
-    { label: '印刷', icon: <Printer size={18} />, onClick: handlePrint },
-  ];
 
   return (
     <div id="support-impl-print" className="max-w-[1400px] mx-auto flex flex-col gap-8 print:gap-4 pb-20 print:pb-0 animate-fade-in">
+      {rows.some(row => needsNewsletterReview(row, newsletters)) && <details className="order-first rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 print:hidden">
+        <summary className="cursor-pointer font-semibold">ツリー通信がない保存済み記録を確認（{rows.filter(row => needsNewsletterReview(row, newsletters)).length}件）</summary>
+        <p className="mt-3 text-xs leading-relaxed">通信がなくても、保存済みの療育記録は残ります。内容を確認し、不要な行だけアーカイブしてください。元の記録は残り、表の行から戻せます。</p>
+        <div className="mt-3 max-h-64 overflow-auto rounded-lg border border-amber-200 bg-white">
+          <table className="w-full text-left text-xs">
+            <thead className="sticky top-0 bg-amber-50"><tr><th className="p-2">日付</th><th className="p-2">保存済みの結果・予定</th><th className="p-2">操作</th></tr></thead>
+            <tbody>{rows.map((row, index) => needsNewsletterReview(row, newsletters) && <tr key={row.id} className="border-t border-amber-100">
+              <td className="whitespace-nowrap p-2">{row.date}</td><td className="p-2">{(row.content.resultInfo || row.content.futurePlan || row.content.supportContent?.join('、') || '').slice(0, 100)}</td>
+              <td className="p-2"><button type="button" onClick={() => archiveRow(index)} className="whitespace-nowrap rounded-lg border border-slate-200 px-3 py-2 text-slate-700 hover:bg-slate-50">アーカイブ</button></td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </details>}
       {/* 自動保存ステータスインジケーター */}
       {saveStatus !== 'idle' && (
         <div className="fixed bottom-24 right-6 z-50 flex items-center gap-2 pointer-events-none print:hidden">
@@ -2053,271 +1342,67 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
         </div>
       )}
 
-      <div className="flex items-center justify-between print:hidden">
-        <div className="flex items-center gap-2">
-          <button onClick={() => navigate(`/children/${childId}`)} className="flex items-center gap-2 text-slate-500 font-medium">
-            <ArrowLeft size={18} /> <span className="text-slate-400">書類一覧</span>
+      {mobileHeaderSlot&&createPortal(<div className="mobile-document-header pb-2">
+        <DocumentTypeSelect childId={childId!} month={currentMonth} current="implementation"/>
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="min-w-0 flex-1"><ChildSwitcher childId={childId!} name={selectedChild.fullName} childrenData={childrenData} officeId={selectedOfficeId} current="implementation" month={currentMonth}/></div>
+          <div className="w-20 shrink-0"><MonthPicker value={currentMonth} onChange={month=>navigate(`/children/${childId}/support-plan/${month}`)}/></div>
+          <SupportImplementationToolbar compact onAuthorSettings={()=>setIsAuthorSettingsOpen(true)} onPrint={handlePrint} onExport={()=>setTransferDirection('export')} onImport={()=>setTransferDirection('import')} onImportResults={()=>setIsResultImportOpen(true)} onHistory={()=>setIsChangeHistoryOpen(true)}/>
+        </div>
+      </div>,mobileHeaderSlot)}
+      <div className="document-desktop-header flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-white px-5 py-3 rounded-2xl border border-slate-200/80 shadow-sm shrink-0 print:hidden">
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" onClick={() => navigate('/monthly-summary')} aria-label="実施状況の表へ戻る" title="実施状況の表へ戻る" className="shrink-0 rounded-xl p-2 text-slate-500 transition-colors hover:bg-slate-100">
+            <ArrowLeft size={20} />
           </button>
-          <ChevronRight size={14} className="text-slate-300" />
-          <span className="text-sm font-bold text-slate-700">{selectedChild.fullName} 様</span>
-          <ChevronRight size={14} className="text-slate-300" />
-          <span className="text-sm font-semibold text-primary">専門的支援実施計画</span>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
+            <h2 className="mt-0.5 min-w-0"><DocumentTypeSelect childId={childId!} month={currentMonth} current="implementation"/></h2>
+            <ChildSwitcher childId={childId!} name={selectedChild.fullName} childrenData={childrenData} officeId={selectedOfficeId} current="implementation" month={currentMonth}/>
+          </div>
         </div>
 
-        {/* PC表示用：アクションバー（モバイルでは非表示） */}
-        <div className="hidden md:flex gap-2.5 items-center">
-          <input
-            id="excel-file-direct-fallback"
-            type="file"
-            accept=".xlsx"
-            className="hidden"
-            onChange={handleFallbackFileChange}
+        <div className="w-full lg:w-auto lg:shrink-0">
+          <SupportImplementationToolbar key={`${childId}_${selectedOfficeId}_${currentMonth}`}
+            onAuthorSettings={()=>setIsAuthorSettingsOpen(true)}
+            monthPicker={<MonthPicker layout="inline" value={currentMonth} onChange={month=>navigate(`/children/${childId}/support-plan/${month}`)}/>}
+            onPrint={handlePrint}
+            onExport={()=>setTransferDirection('export')} onImport={()=>setTransferDirection('import')}
+            onImportResults={() => setIsResultImportOpen(true)} onHistory={() => setIsChangeHistoryOpen(true)}
           />
-          <input
-            id="excel-file-download-fallback"
-            type="file"
-            accept=".xlsx"
-            className="hidden"
-            onChange={handleDownloadFallbackFileChange}
-          />
-
-          {/* アンドゥ・リドゥ ボタン */}
-          <div className="flex items-center bg-slate-100 rounded-lg p-0.5 border border-slate-300 shadow-sm mr-1">
-            <button
-              onClick={handleUndo}
-              disabled={undoStack.length === 0 || isUndoRedoing}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
-                undoStack.length > 0 && !isUndoRedoing
-                  ? 'bg-white text-slate-700 shadow-xs hover:bg-amber-50 hover:text-amber-800 hover:border-amber-200 cursor-pointer active:scale-95'
-                  : 'text-slate-400 opacity-50 cursor-not-allowed'
-              }`}
-              title="元に戻す (Ctrl+Z)"
-            >
-              <Undo2 size={14} className={undoStack.length > 0 ? 'text-amber-600' : ''} />
-              <span>元に戻す</span>
-              {undoStack.length > 0 && (
-                <span className="ml-0.5 px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] rounded-full font-bold">
-                  {undoStack.length}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={handleRedo}
-              disabled={redoStack.length === 0 || isUndoRedoing}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
-                redoStack.length > 0 && !isUndoRedoing
-                  ? 'bg-white text-slate-700 shadow-xs hover:bg-blue-50 hover:text-blue-800 hover:border-blue-200 cursor-pointer active:scale-95'
-                  : 'text-slate-400 opacity-50 cursor-not-allowed'
-              }`}
-              title="やり直す (Ctrl+Y)"
-            >
-              <Redo2 size={14} className={redoStack.length > 0 ? 'text-blue-600' : ''} />
-              <span>やり直す</span>
-              {redoStack.length > 0 && (
-                <span className="ml-0.5 px-1.5 py-0.5 bg-blue-100 text-blue-800 text-[10px] rounded-full font-bold">
-                  {redoStack.length}
-                </span>
-              )}
-            </button>
-          </div>
-
-          <button
-            onClick={handleCopyTreeCommunications}
-            className="flex items-center gap-2 cursor-pointer bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 rounded-lg px-4 py-2 text-sm font-semibold transition-colors shadow-sm"
-            title="選択された（未選択時はすべての）ツリー通信を日付別でコピーします(個人情報保護のため児童名は除外)"
-          >
-            <Copy size={16} className="text-slate-500" />
-            <span>ツリー通信をコピー</span>
-          </button>
-          
-          <button
-            onClick={() => setIsImportOpen(true)}
-            className="flex items-center gap-2 cursor-pointer bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 rounded-lg px-4 py-2 text-sm font-semibold transition-colors shadow-sm"
-            title="専門的支援実施計画のExcelファイルから児童・月・療育内容・結果・予定を取り込みます"
-          >
-            <FileSpreadsheet size={16} className="text-emerald-600" />
-            <span>Excelからインポート</span>
-          </button>
-
-          <button
-            onClick={() => setIsResultImportOpen(true)}
-            className="flex items-center gap-2 cursor-pointer bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 rounded-lg px-4 py-2 text-sm font-semibold transition-colors shadow-sm"
-            title="Geminiで変換した療育結果を一括で登録します"
-          >
-            <Sparkles size={16} className="text-primary" />
-            <span>結果を一括登録</span>
-          </button>
-
-          <button
-            onClick={handleDirectOverwriteExcel}
-            className="flex items-center gap-2 cursor-pointer bg-slate-800 hover:bg-slate-700 text-white rounded-lg px-4 py-2 text-sm font-semibold transition-colors shadow-sm"
-            title="選択したファイル自体を直接上書き保存します（ファイルを閉じて実行してください）"
-          >
-            <UploadCloud size={16} />
-            <span>既存Excelに直接上書き</span>
-          </button>
-          
-          <button
-            onClick={() => {
-              const input = document.getElementById('excel-file-download-fallback') as HTMLInputElement;
-              if (input) input.click();
-            }}
-            className="flex items-center gap-2 cursor-pointer bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 rounded-lg px-4 py-2 text-sm font-semibold transition-colors shadow-sm"
-            title="選択したファイルを元に、上書きされた新しいファイルをダウンロードします（ファイルを開いたままでも実行可能）"
-          >
-            <Download size={16} className="text-slate-500" />
-            <span>既存Excelに上書きしてダウンロード</span>
-          </button>
-          
-          {exportLogs.length > 0 && (
-            <button
-              onClick={() => setIsExportLogOpen(true)}
-              className="text-xs text-primary hover:text-primary-dark font-bold bg-primary/10 hover:bg-primary/20 rounded-lg px-3 py-2 transition-colors flex items-center gap-1"
-              title="書き込みログを確認"
-            >
-              ログを確認
-            </button>
-          )}
-          {/* データ削除メニュードロップダウン */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setIsDeleteMenuOpen(!isDeleteMenuOpen)}
-              className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 rounded-lg px-3 py-2 text-xs font-bold transition-colors shadow-sm"
-              title="この児童の支援計画データを削除"
-            >
-              <Trash2 size={15} />
-              <span>計画データ削除</span>
-              <span className="text-[10px]">▼</span>
-            </button>
-            {isDeleteMenuOpen && (
-              <>
-                <div 
-                  className="fixed inset-0 z-40" 
-                  onClick={() => setIsDeleteMenuOpen(false)} 
-                />
-                <div className="absolute right-0 mt-1.5 w-64 bg-white rounded-xl shadow-xl border border-red-100 py-1.5 z-50 animate-fade-in text-left">
-                  <div className="px-3 py-1.5 text-[11px] font-bold text-slate-400 border-b border-slate-100">
-                    専門的支援計画のデータ削除
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsDeleteMenuOpen(false);
-                      setIsSelectionMode(!isSelectionMode);
-                      setSelectedRowIds(new Set());
-                    }}
-                    className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Check size={14} className="text-slate-400" />
-                    <span>{isSelectionMode ? '一括選択モードを終了' : '行を選択して一括削除'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsDeleteMenuOpen(false);
-                      handleDeleteCurrentMonthAll();
-                    }}
-                    className="w-full text-left px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Trash2 size={14} className="text-red-500" />
-                    <span>当月（{planMeta?.month || currentMonth}）の計画を全削除</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsDeleteMenuOpen(false);
-                      handleDeleteChildAllPlans();
-                    }}
-                    className="w-full text-left px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-100/70 flex items-center gap-2 border-t border-slate-100 cursor-pointer"
-                  >
-                    <AlertTriangle size={14} className="text-red-600" />
-                    <span>この児童の【全期間】の計画を削除</span>
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-
-          {isSelectionMode && (
-            <button
-              onClick={selectedRowIds.size > 0 ? handleDeleteSelected : () => setIsSelectionMode(false)}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold transition-all shadow-sm ${
-                selectedRowIds.size > 0
-                  ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse'
-                  : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
-              }`}
-            >
-              {selectedRowIds.size > 0 ? (
-                <>
-                  <Trash2 size={14} />
-                  <span>選択した{selectedRowIds.size}件を削除</span>
-                </>
-              ) : (
-                <>
-                  <X size={14} />
-                  <span>選択解除</span>
-                </>
-              )}
-            </button>
-          )}
-
-          <button 
-            className="btn-primary flex items-center gap-2" 
-            onClick={handleSave}
-            disabled={saveStatus === 'saving'}
-          >
-            {saveStatus === 'saving' ? (
-              <>
-                <Loader2 size={16} className="animate-spin" />
-                <span>保存中...</span>
-              </>
-            ) : (
-              <>
-                <Save size={16} />
-                <span>保存する</span>
-              </>
-            )}
-          </button>
         </div>
       </div>
-
-      <FloatingActionMenu actions={menuActions} />
+      {deleteTarget && deleteTarget.scope===selectedOfficeId+'_'+childId+'_'+currentMonth && <ViewportModal className="fixed inset-0 z-[10020] flex items-center justify-center bg-slate-900/50 p-4 print:hidden" onKeyDown={event=>{if(event.key==='Escape')setDeleteTarget(null);}}>
+        <section role="alertdialog" aria-modal="true" aria-labelledby="delete-row-title" aria-describedby="delete-row-description" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
+          <h3 id="delete-row-title" className="text-base font-bold text-slate-800">{deleteTarget.row.date}の行を削除しますか？</h3>
+          <p id="delete-row-description" className="mt-3 text-sm leading-relaxed text-slate-600">この行の療育内容・結果・今後の予定を削除します。ツリー通信の元データは残ります。</p>
+          <div className="mt-6 flex justify-end gap-3"><button autoFocus type="button" onClick={()=>setDeleteTarget(null)} className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600">キャンセル</button><button type="button" onClick={confirmDeleteRow} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700">削除する</button></div>
+        </section>
+      </ViewportModal>}
+      {transferDirection&&<DocumentTransferModal scope={{book:'implementation',officeId:selectedOfficeId,month:currentMonth,children:childrenData,childId}} officeName={officeName} direction={transferDirection} beforeTransfer={async()=>{const signature=activeScope.current+':'+supportDraftSignature(planMeta,rows);await handleSave();if(lastSavedDraft.current!==signature)throw new Error('編集中の内容を保存できませんでした。保存状態を確認してください。');}} onImported={()=>fetchData()} onClose={()=>setTransferDirection(null)} onExcel={transferDirection==='export'?()=>void handleDirectOverwriteExcel():()=>setExcelImportOpen(true)}/>}
+      {excelImportOpen&&<ViewportModal className="fixed inset-0 z-[10020] flex items-center justify-center bg-slate-900/60 p-4"><section role="dialog" aria-modal="true" aria-label="専門的支援実施計画のExcelインポート" className="flex h-[90dvh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white"><header className="flex justify-between border-b p-4"><h2 className="font-bold">Excelインポート</h2><button type="button" onClick={()=>setExcelImportOpen(false)} className="min-h-10 px-3">閉じる</button></header><div className="min-h-0 flex-1 overflow-y-auto p-4"><BatchExcelImport selectedOfficeId={selectedOfficeId} selectedMonth={currentMonth} childrenData={selectedChild?[selectedChild]:[]} onDataChange={()=>void fetchData()}/></div></section></ViewportModal>}
+      {isAuthorSettingsOpen&&<ImplementationAuthorSettings key={selectedOfficeId+'_'+currentMonth} officeId={selectedOfficeId} officeName={officeName} month={currentMonth} onSaved={setMonthlySettings} onClose={()=>setIsAuthorSettingsOpen(false)}/>}
+      {isChangeHistoryOpen && childId && <SupportChangeHistory key={`${selectedOfficeId}_${childId}_${currentMonth}`} officeId={selectedOfficeId} childId={childId} month={currentMonth} onClose={()=>setIsChangeHistoryOpen(false)} />}
+      {isPrintSettingsOpen && <SupportImplementationPrintSettings
+        key={`${childId}_${selectedOfficeId}_${currentMonth}`}
+        documentData={{childName: selectedChild.fullName, officeName, month: planMeta.month,
+          goals: getTargetGoalsText(),
+          creator: getExportMeta().exportCreator,
+          createdDate: (() => {const date = new Date(getExportMeta().exportDate); return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('ja-JP-u-ca-japanese', {era: 'long', year: 'numeric', month: 'long', day: 'numeric'}).format(date) + '作成';})(),
+        }}
+        rows={prepareSupportPrintRows(filterOfficeAttendanceRows(rows, officeAttendanceDateKeys, currentMonth), currentMonth)}
+        onClose={() => setIsPrintSettingsOpen(false)}
+      />}
 
 
       <div className="glass-panel p-10 print:p-4 bg-white/95">
-        <div className="flex items-baseline justify-center mb-10 print:mb-4 border-b-2 border-slate-800 pb-6 print:pb-2 print:text-black">
-          <div className="flex-1 hidden md:block print:block"></div>
-          <div className="tracking-widest text-3xl print:text-4xl font-black text-center shrink-0">
-            専門的支援実施計画
-          </div>
-          <div className="flex-1 text-left pl-4 font-normal text-base print:text-lg">
-            ({officeName})
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-8 print:gap-4 mb-8 print:mb-4">
-          <div className="border-b border-slate-400 pb-2 flex items-end gap-3 print:pl-16">
-            <UserIcon size={20} className="text-primary mb-1 print:hidden" />
-            <span className="text-2xl font-bold print:text-3xl print:text-black">{selectedChild.fullName} 様</span>
-          </div>
-          <div className="border-b border-slate-400 pb-2 flex items-end gap-3">
-            <Calendar size={20} className="text-primary mb-1 print:hidden" />
-            <input type="month" value={planMeta.month} style={{ touchAction: 'pan-y' }} onChange={handleMonthChange} className="text-xl font-bold outline-none bg-transparent print:hidden" />
-            <span className="hidden print:inline-block font-bold print:text-3xl print:text-black">
-              {planMeta.month.replace('-', '年')}月
-            </span>
-          </div>
-        </div>
-
-        {/* ===== 支援目標（専門的支援計画書またはExcelインポートから共有） ===== */}
+        {/* ===== 支援目標（個別支援計画書またはExcelインポートから共有） ===== */}
         {(() => {
           const hasImportedGoals = !!(planMeta.goals && planMeta.goals.trim());
-          const isViewingImported = planMeta.selectedProfPlanId === 'imported' || (!profPlan && hasImportedGoals);
+          const isViewingImported = !profPlan && availableProfPlans.length === 0 && hasImportedGoals;
           const parsedGoals = hasImportedGoals ? parseGoalsText(planMeta.goals) : null;
 
           return (
-            <div className="mb-10 print:mb-4 bg-slate-50 rounded-xl border overflow-hidden">
+            <div className="mb-4 bg-slate-50 rounded-xl border overflow-hidden">
               <div className="flex items-center justify-between px-5 py-3 border-b bg-white">
                 <div className="flex items-center gap-4">
                   <h3 className="text-sm font-bold flex items-center gap-2 uppercase">
@@ -2325,88 +1410,30 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
                   </h3>
                   <div className="flex items-center gap-2 print:hidden">
                     <span className="text-[10px] font-bold text-slate-500">反映元:</span>
-                    <select
-                      className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none text-slate-700 font-semibold"
-                      value={planMeta.selectedProfPlanId || (isViewingImported ? 'imported' : 'auto')}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setPlanMeta(prev => prev ? { ...prev, selectedProfPlanId: val } : null);
-                      }}
-                    >
-                      {hasImportedGoals && (
-                        <option value="imported">Excelインポート / 登録済みの目標</option>
-                      )}
-                      <option value="auto">専門的支援計画書 (自動判定)</option>
-                      {[...availableProfPlans]
-                        .sort((a, b) => {
-                           const aM = a.startMonth || (a.createdAt ? a.createdAt.slice(0, 7) : "");
-                           const bM = b.startMonth || (b.createdAt ? b.createdAt.slice(0, 7) : "");
-                           return bM.localeCompare(aM);
-                        })
-                        .map(p => (
-                        <option key={p.id} value={p.id}>
-                          計画書: {p.startMonth ? `${p.startMonth.replace('-', '年')}月開始分` : `${p.createdAt ? p.createdAt.replace(/-/g, '/').slice(0, 10) : '日付不明'}作成`}
-                        </option>
-                      ))}
-                    </select>
+                    <span className="text-sm font-semibold text-slate-700">
+                      {profPlan ? '本案：'+supportGoalPlanMonth(profPlan).replace('-', '年')+'月開始分（自動）' : '対象月に有効な本案なし'}
+                    </span>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-3 print:hidden">
-                  {/* 編集モード切り替えボタン */}
-                  <button
-                    onClick={() => setIsEditingGoals(!isEditingGoals)}
-                    className="flex items-center gap-1.5 text-xs font-bold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition-colors"
-                    title={isEditingGoals ? "プレビュー表示に戻す" : "目標テキストを直接編集する"}
-                  >
-                    {isEditingGoals ? (
-                      <>
-                        <Check size={14} className="text-emerald-600" />
-                        <span>プレビュー表示</span>
-                      </>
-                    ) : (
-                      <>
-                        <Edit3 size={14} className="text-slate-500" />
-                        <span>テキスト編集</span>
-                      </>
-                    )}
-                  </button>
-
                   {isViewingImported ? (
                     <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
                       Excelインポート / 登録テキストより反映中
                     </span>
                   ) : profPlan ? (
                     <span className="text-[10px] text-primary font-semibold bg-primary/10 px-2 py-0.5 rounded-full">
-                      {planMeta.selectedProfPlanId && planMeta.selectedProfPlanId !== 'auto'
-                        ? '手動選択した計画書より参照中'
-                        : (profPlan.isReflected && profPlan.reflectedStartMonth 
-                          ? `${profPlan.reflectedStartMonth.replace('-', '年')}月開始分の個別支援計画書（本案）から反映中`
-                          : '専門的支援計画書より自動参照中')}
+                      {supportGoalPlanMonth(profPlan).replace('-', '年')+'月開始分の本案から自動反映中'}
                     </span>
                   ) : (
                     <span className="text-[10px] text-amber-600 font-semibold bg-amber-50 px-2 py-0.5 rounded-full">
-                      ※専門的支援計画書が未作成です
+                      ※対象月に有効な本案がありません（開始月を含む6か月）
                     </span>
                   )}
                 </div>
               </div>
 
-              {/* 編集モード時 */}
-              {isEditingGoals ? (
-                <div className="p-5 space-y-2">
-                  <textarea
-                    className="w-full h-28 p-3 bg-white border border-slate-300 rounded-xl outline-none text-sm leading-relaxed focus:ring-2 focus:ring-primary shadow-xs"
-                    style={{ touchAction: 'pan-y' }}
-                    placeholder="支援目標を入力してください…（例: 長期目標：... 短期目標：... 具体的目標：①... ②... ③... ④... ⑤...）"
-                    value={planMeta.goals}
-                    onChange={e => setPlanMeta({ ...planMeta, goals: e.target.value })}
-                  />
-                  <p className="text-[11px] text-slate-400 font-medium">
-                    💡 「①②③」は本人支援、「④」は家族支援、「⑤」は移行支援として自動色分けされます。
-                  </p>
-                </div>
-              ) : isViewingImported && parsedGoals ? (
+              {isViewingImported && parsedGoals ? (
                 /* Excelインポート / 登録テキストの色分け表示 */
                 <div className="p-5 print:p-3 flex flex-col gap-4 print:gap-2 text-sm print:text-xs print-tight-layout">
                   {/* 長期目標 */}
@@ -2551,13 +1578,14 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
                 <div className="p-8 text-center text-slate-400 text-sm space-y-2">
                   <p className="font-semibold">支援目標が登録されていません</p>
                   <p className="text-xs text-slate-400">
-                    「Excelからインポート」を行うか、「テキスト編集」ボタンから入力してください。
+                    個別支援計画書の本案に支援目標を入力すると、対象月に応じて自動反映されます。
                   </p>
                 </div>
               )}
             </div>
           );
         })()}
+
 
         {/* モバイルは overflow 系を一切持たない素の div にする。
             overflow-x-hidden でもブラウザが「潜在的なスクロールコンテナ」と判断し
@@ -2579,7 +1607,6 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           >
             <div className="hidden md:table-header-group print:table-header-group sticky top-0 z-20">
               <div className="bg-slate-800 text-white text-[10px] md:text-xs print:bg-white print:text-black print:text-[20px] print:border-b-2 print:border-black shadow-sm md:table-row print:table-row">
-                {isSelectionMode && <div className="p-2 md:p-4 w-[50px] border-r border-slate-600 print:hidden md:table-cell font-bold text-center align-middle">選択</div>}
                 <div className="p-2 md:p-4 print:p-1 w-[60px] md:w-[80px] print:w-[8%] border-r border-slate-600 md:table-cell print:table-cell font-bold text-center align-middle">
                   <div className="flex flex-col items-center gap-1">
                     <span className="print:text-black print:text-[18px]">日付</span>
@@ -2597,21 +1624,14 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
                 <div className={`p-2 md:p-4 bg-primary border-r border-slate-600 print:hidden transition-all duration-300 relative group md:table-cell font-bold text-center align-middle ${isNewsletterCollapsed ? 'w-[50px] min-w-[50px]' : 'w-[25%] min-w-[180px] md:min-w-[240px]'}`}>
                   <div className="flex items-center justify-center gap-2">
                     {!isNewsletterCollapsed && <span>ツリー通信</span>}
-                    <button
-                      onClick={() => setIsNewsletterCollapsed(!isNewsletterCollapsed)}
-                      className="p-1 hover:bg-white/20 rounded transition-colors"
-                      title={isNewsletterCollapsed ? "展開する" : "格納する"}
-                    >
-                      {isNewsletterCollapsed ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
-                    </button>
+
                   </div>
                 </div>
                 <div className="p-2 md:p-4 print:p-1 border-r border-slate-600 w-[18%] print:w-[22%] min-w-[140px] md:min-w-[180px] print:min-w-0 md:table-cell print:table-cell font-bold text-center align-middle"><span className="print:text-black print:text-[18px]">療育内容</span></div>
                 <div className="p-2 md:p-4 print:p-1 border-r border-slate-600 w-[25%] print:w-[40%] min-w-[200px] md:min-w-[280px] print:min-w-0 md:table-cell print:table-cell font-bold text-center align-middle"><span className="print:text-black print:text-[18px]">療育を行った結果</span></div>
                 <div className="p-2 md:p-4 print:p-1 border-r border-slate-600 w-[18%] print:w-[30%] min-w-[140px] md:min-w-[200px] print:min-w-0 md:table-cell print:table-cell font-bold text-center align-middle"><span className="print:text-black print:text-[18px]">今後の予定</span></div>
                 <div className="p-2 md:p-4 w-[70px] md:w-[80px] bg-slate-800 z-10 border-l border-slate-600 print:hidden md:table-cell font-bold text-center align-middle">
-                  <div className="flex items-center justify-center gap-1.5 text-slate-400" title="操作（削除 / アーカイブ）">
-                    <Trash2 size={13} />
+                  <div className="flex items-center justify-center gap-1.5 text-slate-400" title="アーカイブ">
                     <Archive size={13} />
                   </div>
                 </div>
@@ -2631,19 +1651,18 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
                   toggleSupportContent={toggleSupportContent}
                   updateRowContent={updateRowContent}
                   handleSyncFromNewsletter={handleSyncFromNewsletter}
+                  onDeleteRow={idx=>setDeleteTarget({scope:selectedOfficeId+'_'+childId+'_'+currentMonth,row:rows[idx]})}
                   archiveRow={archiveRow}
                   newsletters={newsletters}
-                  isSelectionMode={isSelectionMode}
-                  isSelected={selectedRowIds.has(`${childId}_${row.date}`)}
-                  onToggleSelect={() => toggleSelection(`${childId}_${row.date}`)}
                   onSingleAiConvert={handleSingleAiConvert}
                   isRecentlyImported={recentlyImportedDates.has(row.date)}
-                  onDeleteRow={handleDeleteRow}
                 />
               ))}
             </div>
           </div>
         </div>
+
+        <button type="button" onClick={addRow} className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 py-3 text-sm font-semibold text-slate-600 hover:border-primary hover:bg-primary/5 hover:text-primary print:hidden"><Plus size={17} />行を追加</button>
 
         {/* ===== 印刷専用フッター ===== */}
         <div className="hidden print:flex justify-between items-end mt-12 print:mt-8 pt-6 border-t-2 border-slate-800 text-[11px] print:text-xl print:text-black print:font-bold page-break-inside-avoid">
@@ -2666,69 +1685,19 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
         </div>
       </div>
 
-      {/* 専門的支援実施計画 Excelインポートモーダル */}
-      <DailyReportImportModal
-        isOpen={isImportOpen}
-        onClose={() => setIsImportOpen(false)}
-        onImportSuccess={(historyAction) => {
-          if (historyAction) {
-            setUndoStack(prev => [...prev, historyAction]);
-            setRedoStack([]); // 新規インポート時はリドゥスタックをクリア
-
-            // インポートされた日付を抽出してハイライト色付け
-            const dateSet = new Set<string>();
-            historyAction.after.dailyReports.forEach(r => {
-              if (r.payload?.date) {
-                const parts = r.payload.date.split('-');
-                if (parts.length === 3) {
-                  dateSet.add(`${parseInt(parts[1], 10)}月${parseInt(parts[2], 10)}日`);
-                } else {
-                  dateSet.add(r.payload.date);
-                }
-              }
-            });
-            if (dateSet.size > 0 && planMeta?.excludedDates && planMeta.excludedDates.length > 0) {
-              const updatedExcluded = planMeta.excludedDates.filter(d => !dateSet.has(d));
-              if (updatedExcluded.length !== planMeta.excludedDates.length) {
-                const targetMonth = planMeta.month || currentMonth;
-                const newMeta = { ...planMeta, excludedDates: updatedExcluded };
-                setPlanMeta(newMeta);
-                const planDocPref = doc(db, PLAN_COL, `${selectedOfficeId}_${childId}_${targetMonth}`);
-                const planDocNoPref = doc(db, PLAN_COL, `${childId}_${targetMonth}`);
-                setDoc(planDocPref, { excludedDates: updatedExcluded }, { merge: true });
-                setDoc(planDocNoPref, { excludedDates: updatedExcluded }, { merge: true });
-              }
-            }
-
-            setHistoryToast({
-              message: `${historyAction.summary} を実行しました（反映行を緑色でハイライト中）`,
-              actionId: historyAction.id,
-              type: 'success',
-              canUndo: true
-            });
-          }
-          fetchData();
-        }}
-        currentMonth={currentMonth}
-        childId={childId}
-        childrenData={childrenData}
-        selectedOfficeId={selectedOfficeId}
-        offices={offices}
-        loginStaffName={loginStaffName}
-      />
-
       {/* Gemini療育結果一括登録モーダル */}
       <ResultImportModal
         isOpen={isResultImportOpen}
         onClose={() => setIsResultImportOpen(false)}
         monthStr={currentMonth}
         existingRows={rows}
+        onGetSource={getTreeCommunicationsText}
         onImport={handleImportResults}
       />
 
       {/* AIデバッグエラーモーダル */}
       {debugError && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[999] flex items-center justify-center p-4 overflow-y-auto animate-fade-in print:hidden">
+        <ViewportModal className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[999] flex items-center justify-center p-4 overflow-y-auto animate-fade-in print:hidden">
           <div className="bg-white rounded-2xl border border-slate-200/80 shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col my-8 max-h-[85vh] animate-scale-up">
             {/* ヘッダー */}
             <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between border-b border-slate-800">
@@ -2892,28 +1861,29 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
               </button>
             </div>
           </div>
-        </div>
+        </ViewportModal>
       )}
 
       {/* エクスポート完了モーダル */}
       {isExportSuccessOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 print:hidden animate-fade-in">
+        <ViewportModal className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 print:hidden animate-fade-in">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-100 max-w-md w-full flex flex-col p-6 text-center space-y-4">
             <div className="mx-auto w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center">
               <Check size={24} className="stroke-[3]" />
             </div>
             
             <div className="space-y-2">
-              <h3 className="font-black text-slate-800 text-lg">Excel上書き保存が完了しました！</h3>
+              <h3 className="font-black text-slate-800 text-lg">Excelの出力が完了しました</h3>
+              <p className="rounded-lg bg-emerald-50 p-3 text-sm font-bold text-emerald-800">作成したシート：{exportSheetName}</p>
               <div className="text-slate-500 text-sm leading-relaxed space-y-2 text-left">
                 {exportSuccessType === 'direct' ? (
                   <p>
-                    選択されたファイル <span className="font-bold text-slate-700">「{targetFileName}」</span> 自体へ、データを直接上書き保存しました。<br />
+                    選択されたファイル <span className="font-bold text-slate-700">「{targetFileName}」</span> に、原本から作成した対象月のシートを追加して保存しました。<br />
                     エクセルファイルを開き、データが更新されていることをご確認ください。
                   </p>
                 ) : (
                   <p>
-                    上書きされたExcelファイル <span className="font-bold text-slate-700">「{targetFileName.replace(/\.xlsx$/, '')}_上書き版.xlsx」</span> のダウンロードが開始されました。<br />
+                    原本から対象月のシートを追加したExcelファイル <span className="font-bold text-slate-700">「{targetFileName}」</span> のダウンロードが開始されました。<br />
                     ダウンロードされたファイルを開いてデータをご確認ください。
                   </p>
                 )}
@@ -2936,47 +1906,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
               </button>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* エクスポート進捗ログモーダル */}
-      {isExportLogOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 print:hidden animate-fade-in">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-100 max-w-2xl w-full flex flex-col max-h-[85vh] overflow-hidden">
-            {/* ヘッダー */}
-            <div className="bg-slate-50 border-b border-slate-100 px-6 py-4 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2 text-primary">
-                <UploadCloud size={20} />
-                <h3 className="font-black text-slate-800 text-lg">Excel上書きエクスポートの進捗ログ</h3>
-              </div>
-              <button onClick={() => setIsExportLogOpen(false)} className="text-slate-400 hover:text-slate-600 p-1.5 rounded-full hover:bg-slate-100 transition-colors">
-                <X size={20} />
-              </button>
-            </div>
-            {/* ログ一覧 */}
-            <div className="p-6 overflow-y-auto flex-1 font-mono text-xs bg-slate-900 text-slate-200 space-y-1">
-              {exportLogs.length === 0 ? (
-                <div className="text-slate-500 italic py-4">ログがありません。エクスポートを実行してください。</div>
-              ) : (
-                exportLogs.map((log, index) => (
-                  <div key={index} className="py-0.5 border-b border-slate-800/50 last:border-0 leading-relaxed font-semibold">
-                    <span className="text-slate-500 select-none mr-2">[{index + 1}]</span>
-                    <span className={log.includes('➜') ? 'text-emerald-400' : (log.includes('エラー') ? 'text-red-400' : 'text-slate-300')}>{log}</span>
-                  </div>
-                ))
-              )}
-            </div>
-            {/* フッター */}
-            <div className="bg-slate-50 border-t border-slate-100 px-6 py-4 flex justify-end shrink-0">
-              <button
-                onClick={() => setIsExportLogOpen(false)}
-                className="px-5 py-2.5 rounded-xl bg-primary hover:bg-primary/90 text-white text-sm font-bold transition-all"
-              >
-                閉じる
-              </button>
-            </div>
-          </div>
-        </div>
+        </ViewportModal>
       )}
 
       {/* アンドゥ・リドゥ操作トースト */}

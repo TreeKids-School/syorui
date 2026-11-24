@@ -1,4 +1,4 @@
-// ---- 専門的支援計画書（個別支援計画書）型定義 ----
+// ---- 個別支援計画書 型定義 ----
 
 export type SupportCategory = '本人支援' | '家族支援' | '移行支援';
 
@@ -16,6 +16,9 @@ export interface SupportRow {
 
 export interface ProfessionalPlanDoc {
   id?: string;
+  archived?:boolean;
+  isPrimary?:boolean;
+  variantIndex?:number; // 同月の追加書類（1）、（2）
   childId: string;
   createdAt: string;       // 作成年月日 "YYYY-MM-DD"
   startMonth?: string;     // 開始月 "YYYY-MM"
@@ -50,8 +53,12 @@ export interface DaySchedule {
 
 export interface ServiceHoursPlan {
   id?: string;
+  archived?:boolean;
+  isPrimary?:boolean;
+  variantIndex?:number; // 同月の追加書類（1）、（2）
   childId: string;
   startMonth: string;           // "YYYY-MM"
+  effectiveStartDate?: string; // 利用時間シートの開始年月日 YYYY-MM-DD
   createdAt: string;            // "YYYY-MM-DD"
   weeklyHours: {
     [day: string]: DaySchedule; // "月", "火", "水", "木", "金", "土", "日"

@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';import fs from 'node:fs';import vm from 'node:vm';import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url),ts=require('typescript');
+const states=[];let index=0,sourceCalls=0;const writes=[];
+const react={useState(initial){const key=index++;if(!(key in states))states[key]=initial;return [states[key],value=>{states[key]=typeof value==='function'?value(states[key]):value;}];}};
+const exports={};const imports={react,'../lib/treeCommunicationCopy':{buildTreeCommunicationCopy:(month,source,multiple)=>'PROMPT '+month+' '+multiple+'\n'+source},'lucide-react':Object.fromEntries(['AlertTriangle','Check','ChevronDown','ChevronUp','Clipboard','ExternalLink'].map(name=>[name,name]))};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/components/ResultWorkflowTools.tsx','utf8'),{compilerOptions:{module:1,target:9,jsx:4}}).outputText,{exports,navigator:{clipboard:{writeText:async text=>writes.push(text)}},require:id=>imports[id]||require(id)});
+const render=()=>{index=0;return exports.ResultWorkflowTools({month:'2026-11',multiple:true,onGetSource:()=>{sourceCalls++;return 'SOURCE ONLY';}});};
+const walk=element=>element&&typeof element==='object'?[element,...[element.props?.children].flat(Infinity).flatMap(walk)]:[];
+const text=element=>typeof element==='string'?element:element&&typeof element==='object'?[element.props?.children].flat(Infinity).map(text).join(''):'';
+let tree=render();assert.equal(walk(tree).filter(element=>element.type==='pre').length,0);assert.equal(sourceCalls,0);assert.ok(!text(tree).includes('個人情報の取り扱いについて'));
+const button=label=>walk(tree).find(element=>element.type==='button'&&text(element)===label);
+button('ツリー通信をコピー').props.onClick();await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(writes,['PROMPT 2026-11 true\nSOURCE ONLY']);assert.equal(sourceCalls,1);
+tree=render();assert.ok(!walk(tree).some(element=>element.type==='button'&&text(element)==='プロンプトをコピー'));assert.equal(walk(tree).filter(element=>element.type==='pre').length,0);
+index=0;tree=exports.ResultWorkflowTools({month:'2026-11',multiple:false,onGetSource:()=> 'INDIVIDUAL SOURCE'});
+button('ツリー通信をコピー').props.onClick();await new Promise(resolve=>setImmediate(resolve));assert.equal(writes[1],'PROMPT 2026-11 false\nINDIVIDUAL SOURCE');
+tree=render();
+button('注意事項').props.onClick();tree=render();assert.ok(text(tree).includes('個人情報の取り扱いについて'));button('注意事項').props.onClick();tree=render();assert.ok(!text(tree).includes('個人情報の取り扱いについて'));
+console.log('PASS: combined prompt/source clipboard payload, individual and multi-child formats, no prompt panel, on-demand source access and collapsed notices');

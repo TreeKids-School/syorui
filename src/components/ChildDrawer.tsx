@@ -1,7 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { X, User, ChevronRight, Settings, LogOut, Building2, Calendar } from 'lucide-react';
-import { auth } from '../lib/firebase';
+import { X, User, ChevronRight, Building2, Calendar } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Child } from '../data/mockData';
 
@@ -169,28 +168,6 @@ export const ChildDrawer: React.FC<ChildDrawerProps> = ({
               })}
             </div>
 
-            {/* フッターメニュー */}
-            <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex flex-col gap-2 shrink-0">
-              <button
-                onClick={() => {
-                  onClose();
-                  navigate('/settings');
-                }}
-                className={`flex items-center gap-3 p-3 rounded-xl font-bold text-sm shadow-sm transition-all text-left w-full ${
-                  window.location.pathname === '/settings' ? 'bg-primary text-white' : 'bg-white text-slate-700 hover:bg-slate-100'
-                }`}
-              >
-                <Settings size={18} /> 
-                <span>設定</span>
-              </button>
-              <button
-                onClick={() => auth.signOut()}
-                className="flex items-center gap-3 p-3 rounded-xl bg-red-50 text-red-500 hover:bg-red-100 font-bold text-sm shadow-sm transition-all"
-              >
-                <LogOut size={18} /> 
-                <span>ログアウト</span>
-              </button>
-            </div>
           </motion.aside>
         </>
       )}

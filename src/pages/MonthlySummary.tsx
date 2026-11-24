@@ -1,9 +1,48 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import {filterSummaryStaff,resolveOwnStaffId} from '../lib/summaryStaffFilter';
+import {DocumentChangeLog} from '../components/DocumentChangeLog';
+import {appendDocumentAudit,auditDocumentWrite} from '../lib/documentAudit';
+import {measureRead} from '../lib/readDiagnostics';
+import {DocumentTransferModal} from '../components/DocumentTransferModal';
+import {ProfessionalPlanBulkImportModal} from '../components/ProfessionalPlanBulkImportModal';
+import {ProfessionalManagerSettings} from '../components/ProfessionalManagerSettings';
+import {MonthlyTaskLabel} from '../components/MonthlyTaskLabel';
+import {BatchSupportPrint} from '../components/BatchSupportPrint';
+import type {BatchSupportPrintTarget} from '../components/BatchSupportPrint';
+import {summarySupportPrintTargets} from '../lib/summarySupportPrintTargets';
+import {resolveStaffColor} from '../lib/staffColor';
+import {shiftCalendarMonth} from '../lib/calendarMonth';
+import {MonthPicker} from '../components/ui/MonthPicker';
+import {HeaderAccountActions} from '../components/HeaderAccountActions';
+import {DropdownSelect} from '../components/ui/DropdownSelect';
+import {ViewportModal} from '../components/ViewportModal';
+import { ChildDocumentMenu } from '../components/ChildDocumentMenu';
+import {summarizeStaffWritingDays} from '../lib/staffWritingSummary';
+import { SummaryTableLayout } from '../components/SummaryTableLayout';
+import type { SummaryTableOrientation } from '../components/SummaryTableLayout';
+import { distributeStaffWorkload, applyStaffDistribution } from '../lib/distributeStaffWorkload';
+import { BatchExcelExport } from '../components/BatchExcelExport';
+import { BatchExcelImport } from '../components/BatchExcelImport';
+import {excelExportOfficePriority} from '../lib/excelExportOfficeScope';
+import {countSummaryAttendance, requiredSummaryDays} from '../lib/summaryAttendance';
+import {getMonthlyTreeCommunications,invalidateMonthlyTreeCommunications} from '../lib/monthlyTreeCommunications';
+import {summaryTreeReadDates} from '../lib/summaryTreeRead';
+import {describeReadError} from '../lib/readError';
+import { SettingsGroup, settingsRowClass } from '../components/SettingsGroup';
+import { getMonthlySettings, monthlySettingsRef } from '../lib/monthlySettings';
+import {SummaryPrintSettings} from '../components/SummaryPrintSettings';
+import type { SummaryPrintOptions } from '../lib/printSummaryTable';
+import { selectSpacedAdoptionDays, resolveAdoptionShortage } from '../lib/spacedAdoptionDays';
+import type { AdoptionShortagePolicy, AdoptionCandidate } from '../lib/spacedAdoptionDays';
+import { isAutoSelectCandidate } from '../lib/autoSelectWeek';
+import { orderSummaryChildren, japanDateKey } from '../lib/summaryChildOrder';
+import type { SummaryChildOrder } from '../lib/summaryChildOrder';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate,useSearchParams } from 'react-router-dom';
 import { 
-  ChevronLeft, 
-  ChevronRight, 
+  Printer, Clock,
+  ArrowDownUp,
+  ChevronDown,
   Calendar, 
   Loader2, 
   ArrowLeft,
@@ -12,14 +51,10 @@ import {
   Settings as SettingsIcon,
   X,
   Check,
-  Copy,
   Sparkles,
   HelpCircle,
-  BookmarkCheck,
   RotateCcw,
   Wand2,
-  Save,
-  Crosshair,
   Users
 } from 'lucide-react';
 
@@ -31,7 +66,6 @@ import {
   documentId,
   doc,
   getDoc,
-  setDoc,
   serverTimestamp,
   writeBatch
 } from 'firebase/firestore';
@@ -47,18 +81,7 @@ export interface StaffMember {
   color: string;
 }
 
-export const STAFF_COLORS = [
-  '#2563eb', // blue
-  '#059669', // emerald
-  '#d97706', // amber
-  '#7c3aed', // purple
-  '#db2777', // pink
-  '#0891b2', // cyan
-  '#ea580c', // orange
-  '#0d9488', // teal
-  '#4f46e5', // indigo
-  '#65a30d', // lime
-];
+export {STAFF_COLORS} from '../lib/staffColor';
 
 export interface AttendanceInfo {
   officeId: string;
@@ -71,18 +94,36 @@ export interface AttendanceInfo {
   assignedStaff?: string;
 }
 
+
+const SUMMARY_ORDER_OPTIONS:readonly {value:SummaryChildOrder;label:string}[]=[
+  {value:'original',label:'元の順番'},
+  {value:'staff',label:'スタッフごとにまとめる'},
+  {value:'name-asc',label:'名前順（読み仮名・昇順）'},
+  {value:'name-desc',label:'名前順（読み仮名・降順）'},
+  {value:'today',label:'本日来る児童を先頭'},
+  {value:'attendance-desc',label:'出席日数の多い順'},
+  {value:'attendance-asc',label:'出席日数の少ない順'}
+];
+
+type StaffDisplayMode = 'icon' | 'icon-name' | 'name';
+
 type MonthlySummaryProps = {
   childrenData: Child[];
   selectedOfficeId: string;
+  onOfficeChange:(id:string)=>void;
   offices: { id: string; name: string }[];
 };
 
 export const MonthlySummary: React.FC<MonthlySummaryProps> = ({ 
-  childrenData, 
+  childrenData: allChildrenData,
   selectedOfficeId,
+  onOfficeChange,
   offices 
 }) => {
   const navigate = useNavigate();
+  const [searchParams]=useSearchParams();
+  const authorShortcut=searchParams.get('settings')==='implementation-author';
+  const childrenData = useMemo(() => allChildrenData.filter(child => !child.archived), [allChildrenData]);
   
   // 現在の事業所名
   const currentOffice = offices.find(o => o.id === selectedOfficeId);
@@ -90,10 +131,23 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
   // 対象月 (YYYY-MM)
   const [currentMonth, setCurrentMonth] = useState(() => {
-    return new Date().toISOString().slice(0, 7);
+    const requested=searchParams.get('month')||'';
+    return /^\d{4}-(0[1-9]|1[0-2])$/.test(requested)?requested:japanDateKey().slice(0,7);
   });
 
   const [isLoading, setIsLoading] = useState(true);
+  const [monthlyReadError, setMonthlyReadError] = useState('');
+  const monthlyReadInFlight = useRef('');
+  const [staffFilter,setStaffFilter]=useState('mine');
+  const [mobileHeaderSlot,setMobileHeaderSlot]=useState<HTMLElement|null>(null);
+  useEffect(()=>{setMobileHeaderSlot(document.getElementById('mobile-summary-header-slot'));},[]);
+  const assignedOnlyToggles=[{label:'担当児童のみ表示',checked:staffFilter==='mine',onChange:(checked:boolean)=>setStaffFilter(checked?'mine':'all')}];
+  const [childOrder, setChildOrder] = useState<SummaryChildOrder>('original');
+  const [today, setToday] = useState(() => japanDateKey());
+  useEffect(() => {
+    const timer = window.setInterval(() => setToday(japanDateKey()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // カレンダー設定 (休みの日・個別療育の日 - 曜日単位)
   const [summarySettings, setSummarySettings] = useState<{
@@ -101,14 +155,33 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
     individualDaysOfWeek: number[];
     holidayColor: string;
     individualColor: string;
+    hiddenCountRows: string[];
+    focusHighlightEnabled: boolean;
+    staffDisplayMode: StaffDisplayMode;
+    tableOrientation: SummaryTableOrientation;
   }>({
     holidayDaysOfWeek: [],
     individualDaysOfWeek: [],
     holidayColor: '#ffe4e6',
     individualColor: '#e0f2fe',
+    hiddenCountRows: [] as string[],
+    focusHighlightEnabled: true,
+    staffDisplayMode: 'icon-name' as StaffDisplayMode,
+    tableOrientation: 'children-columns' as SummaryTableOrientation,
   });
 
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(authorShortcut);
+  const [settingsDataChanged, setSettingsDataChanged] = useState(false);
+  const [implementationTab, setImplementationTab] = useState<'author' | 'excel-import' | 'excel-export'>('author');
+  const [transferRequest,setTransferRequest]=useState<{book:'implementation'|'professional';direction:'export'|'import'}|null>(null);
+  const [professionalExcelImportOpen,setProfessionalExcelImportOpen]=useState(false);
+  const [managerSettingsOffice,setManagerSettingsOffice]=useState<{id:string;name:string}|null>(null);
+  const [settingsTab, setSettingsTab] = useState<'table' | 'implementation' | 'professional' | 'office'>(authorShortcut?'implementation':'table');
+  const [implementationDraft, setImplementationDraft] = useState({ implementationCreator: '', implementationYear: '', implementationMonth: '', implementationDay: '' });
+  const [inheritedMonthlySettings, setInheritedMonthlySettings] = useState<Record<string, unknown>>({});
+  const [implementationSettingsKey, setImplementationSettingsKey] = useState('');
+  const [implementationSettingsError, setImplementationSettingsError] = useState('');
+  const [isImplementationSettingsLoading, setIsImplementationSettingsLoading] = useState(false);
   const [isLegendOpen, setIsLegendOpen] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isResultImportOpen, setIsResultImportOpen] = useState(false);
@@ -119,21 +192,51 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
     individualDaysOfWeek: [] as number[],
     holidayColor: '#ffe4e6',
     individualColor: '#e0f2fe',
+    hiddenCountRows: [] as string[],
+    focusHighlightEnabled: true,
+    staffDisplayMode: 'icon-name' as StaffDisplayMode,
+    tableOrientation: 'children-columns' as SummaryTableOrientation,
   });
 
-  // 採用日選択モード (true: マスを選択して正式採用/他をアーカイブするモード)
-  const [isSelectionMode, setIsSelectionMode] = useState(false);
   // 各児童の選択された日（day: 1〜31 の Set）
   const [selectedDaysMap, setSelectedDaysMap] = useState<Record<string, Set<number>>>({});
+  const [savedSelectedDaysMap, setSavedSelectedDaysMap] = useState<Record<string, Set<number>>>({});
   const [isSavingAdoptions, setIsSavingAdoptions] = useState(false);
+  const [adoptionSaveError, setAdoptionSaveError] = useState('');
+  const adoptionSaveInFlight = useRef(false);
+  const adoptionScope = useRef('');
+  adoptionScope.current = `${selectedOfficeId}_${currentMonth}`;
 
   // フォーカス（ホバーハイライト）機能のON/OFF切り替え
-  const [isFocusHighlightEnabled, setIsFocusHighlightEnabled] = useState(true);
+  const isFocusHighlightEnabled = summarySettings.focusHighlightEnabled;
+  const hiddenCountRows = summarySettings.hiddenCountRows;
+  const countRowLabels = ['出席日数', '必要日数', '個別以外'];
+  const countRowTop = (index: number) => 144 + countRowLabels.slice(0, index).reduce((height, label) => height + (hiddenCountRows.includes(label) ? 0 : 28), 0);
 
   // スタッフ一覧および担当スタッフ割り当て
   const [staffList, setStaffList] = useState<StaffMember[]>([]);
   const [assignedStaffMap, setAssignedStaffMap] = useState<Record<string, string>>({});
+  const [previousStaffAssignments, setPreviousStaffAssignments] = useState<Record<string, string>>({});
+  const [staffAssignmentLoadedScope, setStaffAssignmentLoadedScope] = useState('');
+  const [staffAssignmentLoadError, setStaffAssignmentLoadError] = useState('');
+  const [staffAssignmentReload, setStaffAssignmentReload] = useState(0);
   const [isDistributeModalOpen, setIsDistributeModalOpen] = useState(false);
+  const [isDocumentLogOpen,setIsDocumentLogOpen]=useState(false);
+  const [isStaffSummaryOpen, setIsStaffSummaryOpen] = useState(false);
+  const [isClearStaffOpen, setIsClearStaffOpen] = useState(false);
+  const [staffActionError, setStaffActionError] = useState('');
+  const [isAutoSelectOpen, setIsAutoSelectOpen] = useState(false);
+  const [isMonthlyTasksOpen, setIsMonthlyTasksOpen] = useState(false);
+  const [batchPrintTargets,setBatchPrintTargets]=useState<BatchSupportPrintTarget[]|null>(null);
+  const [printSource,setPrintSource]=useState<HTMLTableElement|null>(null);
+  const [printSettings, setPrintSettings] = useState<Pick<SummaryPrintOptions, 'orientation' | 'alignment' | 'stripeEvenColumns' | 'repeatDateMiddle' | 'repeatDateRight' | 'excludeZeroAttendance' | 'fontSize' | 'nameFontSize'>>({ orientation: 'landscape', alignment: 'center', stripeEvenColumns: false, repeatDateMiddle: false, repeatDateRight: false, excludeZeroAttendance: false,fontSize:9,nameFontSize:10.5 });
+  const [autoSelectExcludedWeeks, setAutoSelectExcludedWeeks] = useState<number[]>([]);
+  const [autoSelectGap, setAutoSelectGap] = useState('');
+  const [shortagePolicy, setShortagePolicy] = useState<AdoptionShortagePolicy>('partial');
+  const [relaxedGap, setRelaxedGap] = useState('1');
+  const minimumAutoSelectGap = autoSelectGap === '' ? undefined : Number(autoSelectGap);
+  const isAutoSelectGapValid = minimumAutoSelectGap === undefined || (Number.isInteger(minimumAutoSelectGap) && minimumAutoSelectGap >= 1 && minimumAutoSelectGap <= 31);
+  const isRelaxedGapValid = shortagePolicy !== 'relax-gap' || (Number.isInteger(Number(relaxedGap)) && Number(relaxedGap) >= 1 && Number(relaxedGap) <= (minimumAutoSelectGap ?? 1));
   const [selectedStaffForDist, setSelectedStaffForDist] = useState<Set<string>>(new Set());
   const [staffPopoverAnchor, setStaffPopoverAnchor] = useState<{
     childId: string;
@@ -142,38 +245,39 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
   } | null>(null);
   const [isSavingStaffAssignments, setIsSavingStaffAssignments] = useState(false);
   const [groupAdjacentColumns, setGroupAdjacentColumns] = useState(true); // 表の並び順で近接児童をなるべくまとめるオプション
+  const [excludeIndividualWritingDays, setExcludeIndividualWritingDays] = useState(false);
 
   // ホバー中の児童列IDおよび日付行
   const [hoveredColChildId, setHoveredColChildId] = useState<string | null>(null);
   const [hoveredRowDay, setHoveredRowDay] = useState<number | null>(null);
 
-  // セルホバー時の専門的支援実施計画プレビュー
-  const [hoveredCellPreview, setHoveredCellPreview] = useState<{
-    childName: string;
-    dateStr: string;
-    dayOfWeekStr: string;
-    supportContent: string[];
-    resultInfo: string;
-    futurePlan: string;
-    staffName: string;
-    reportStaffName?: string;
-    assignedStaffName?: string;
-    assignedStaffColor?: string;
-    isAdopted: boolean;
-    isReportArchived: boolean;
-    isAttending: boolean;
-    attInfoStr: string;
-    x: number;
-    y: number;
-  } | null>(null);
-
   // モーダルが開かれたら設定状態を初期化
   useEffect(() => {
     if (isSettingsOpen) {
-      setTempSettings({ ...summarySettings });
+      setTempSettings({ ...summarySettings, hiddenCountRows: [...hiddenCountRows] });
     }
-  }, [isSettingsOpen, summarySettings]);
+  }, [isSettingsOpen, summarySettings, hiddenCountRows]);
+
   
+  useEffect(() => {
+    if (!isSettingsOpen) return;
+    let cancelled = false;
+    setIsImplementationSettingsLoading(true);
+    setImplementationSettingsKey('');
+    setImplementationSettingsError('');
+    getMonthlySettings(selectedOfficeId, currentMonth).then(snapshot => {
+      if (cancelled) return;
+      const data = snapshot.exists() ? snapshot.data() : {};
+      setImplementationDraft({ implementationCreator: String(data.implementationCreator ?? ''),
+        implementationYear: String(data.implementationYear ?? ''), implementationMonth: String(data.implementationMonth ?? ''), implementationDay: String(data.implementationDay ?? '') });
+      setInheritedMonthlySettings(snapshot.exists() && snapshot.id === currentMonth ? data : {});
+      setImplementationSettingsKey(`${selectedOfficeId}_${currentMonth}`);
+    }).catch(() => {
+      if (!cancelled) setImplementationSettingsError('作成者・作成日の設定を読み込めませんでした。設定を開き直してください。');
+    }).finally(() => { if (!cancelled) setIsImplementationSettingsLoading(false); });
+    return () => { cancelled = true; };
+  }, [isSettingsOpen, selectedOfficeId, currentMonth]);
+
   // 取得したマージ済みデータ
   const [mergedData, setMergedData] = useState<{
     dailyReports: Record<string, Record<string, any>>;
@@ -223,36 +327,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
         const list: StaffMember[] = [];
         let colorIdx = 0;
 
-        const resolveStaffColor = (colorValue?: string, fallbackIndex: number = 0): string => {
-          if (!colorValue || typeof colorValue !== 'string') {
-            return STAFF_COLORS[fallbackIndex % STAFF_COLORS.length];
-          }
-          const trimmed = colorValue.trim();
-          if (trimmed.startsWith('#') || trimmed.startsWith('rgb') || trimmed.startsWith('hsl')) {
-            return trimmed;
-          }
-          const colorMap: Record<string, string> = {
-            blue: '#2563eb',
-            red: '#dc2626',
-            green: '#16a34a',
-            emerald: '#059669',
-            amber: '#d97706',
-            yellow: '#ca8a04',
-            purple: '#7c3aed',
-            pink: '#db2777',
-            cyan: '#0891b2',
-            orange: '#ea580c',
-            teal: '#0d9488',
-            indigo: '#4f46e5',
-            lime: '#65a30d',
-            rose: '#e11d48',
-          };
-          const lower = trimmed.toLowerCase();
-          for (const [key, val] of Object.entries(colorMap)) {
-            if (lower.includes(key)) return val;
-          }
-          return trimmed;
-        };
+
 
         snap.forEach(d => {
           const data = d.data();
@@ -298,25 +373,43 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
   // 月ごとの児童担当スタッフ割り当てのロード
   useEffect(() => {
+    let cancelled = false;
+    setStaffAssignmentLoadedScope('');
+    setStaffAssignmentLoadError('');
+    setPreviousStaffAssignments({});
+    setAssignedStaffMap({});
+    setExcludeIndividualWritingDays(false);
     const loadStaffAssignments = async () => {
       if (!selectedOfficeId || !currentMonth) return;
       try {
         const assignDocRef = doc(db, 'offices', selectedOfficeId, 'monthly_staff_assignments', currentMonth);
-        const snap = await getDoc(assignDocRef);
+        const previousRef = doc(db, 'offices', selectedOfficeId, 'monthly_staff_assignments', shiftCalendarMonth(currentMonth, -1));
+        const [snap, previousSnap] = await Promise.all([getDoc(assignDocRef), getDoc(previousRef)]);
+        if (cancelled) return;
+        setPreviousStaffAssignments(previousSnap.exists() ? previousSnap.data().assignments || {} : {});
+        const distributionOptions = (snap.exists() ? snap.data().distributionOptions : undefined)
+          ?? (previousSnap.exists() ? previousSnap.data().distributionOptions : undefined);
+        setExcludeIndividualWritingDays(distributionOptions?.excludeIndividualDays === true);
         if (snap.exists()) {
           const data = snap.data();
           setAssignedStaffMap(data.assignments || {});
         } else {
           setAssignedStaffMap({});
         }
+        setStaffAssignmentLoadedScope(`${selectedOfficeId}_${currentMonth}`);
       } catch (e) {
         console.error("Failed to load staff assignments:", e);
+        if (!cancelled) setStaffAssignmentLoadError('担当者の履歴を読み込めませんでした。');
       }
     };
     loadStaffAssignments();
-  }, [selectedOfficeId, currentMonth]);
+    return () => { cancelled = true; };
+  }, [selectedOfficeId, currentMonth, staffAssignmentReload]);
 
   // 担当スタッフの手動更新 & 保存
+  const logStaffAssignments=(batch:ReturnType<typeof writeBatch>,before:Record<string,string>,after:Record<string,string>)=>{
+    for(const childId of new Set([...Object.keys(before),...Object.keys(after)]))if(before[childId]!==after[childId])appendDocumentAudit(batch,{officeId:selectedOfficeId,book:'implementation',childId,month:currentMonth,operation:'担当者の変更'},[{field:'担当スタッフ',action:after[childId]?'変更':'解除'}]);
+  };
   const updateStaffAssignment = useCallback(async (childId: string, staffId: string | null) => {
     const newAssignments = { ...assignedStaffMap };
     if (staffId) {
@@ -329,20 +422,16 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
     try {
       const assignDocRef = doc(db, 'offices', selectedOfficeId, 'monthly_staff_assignments', currentMonth);
-      await setDoc(assignDocRef, {
-        assignments: newAssignments,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
+      const batch=writeBatch(db);batch.set(assignDocRef,{assignments:newAssignments,updatedAt:serverTimestamp()},{mergeFields:['assignments','updatedAt']});logStaffAssignments(batch,assignedStaffMap,newAssignments);await batch.commit();
     } catch (e) {
       console.error("Failed to save staff assignments:", e);
     }
   }, [assignedStaffMap, selectedOfficeId, currentMonth]);
 
   // ---- 全児童のツリー通信を一括コピー（療育結果が未記入のもののみ） ----
-  const handleCopyAllTreeCommunications = () => {
+  const getAllTreeCommunicationsText = () => {
     let copyText = `【対象月】${currentMonth}\n\n`;
     let count = 0;
-    let childCount = 0;
 
     childrenData.forEach((child) => {
       if (!child.id) return;
@@ -356,11 +445,10 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
         const report = childReports[dateKey];
         const treeText = childTexts[dateKey] || "";
         
-        const resultInfo = report?.content?.resultInfo || "";
         const externalInfo = report?.content?.externalInfo || treeText || "";
         
-        const hasResult = resultInfo.trim() !== "";
         const hasTree = externalInfo.trim() !== "";
+        const hasResult = !!report?.content?.resultInfo?.trim();
 
         // 療育結果が未記入のツリー通信のみコピー対象とする
         if (hasTree && !hasResult) {
@@ -371,30 +459,17 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
       if (childRowsText.length > 0) {
         copyText += `■ 児童 (ID: ${child.id})\n${childRowsText.join('\n')}\n\n`;
         count += childRowsText.length;
-        childCount++;
       }
     });
 
-    if (count === 0) {
-      alert('療育結果が未入力のツリー通信はありません。（すべての日の療育結果が入力済みです）');
-      return;
-    }
-
-    navigator.clipboard.writeText(copyText.trim() + '\n')
-      .then(() => {
-        alert(`${childCount}名分、計 ${count}件の療育結果が未入力のツリー通信を日付別でコピーしました。(個人情報保護のため児童名は除外しています)`);
-      })
-      .catch(err => {
-        console.error('Failed to copy: ', err);
-        alert('コピーに失敗しました。');
-      });
+    return count ? copyText : '';
   };
 
   // ---- Geminiでの一括変換結果を全員分インポート ----
   const handleImportAllResults = async (importedData: Record<string, Record<string, string>>) => {
     setIsLoading(true);
     try {
-      const batch = writeBatch(db);
+      let batch = writeBatch(db),batchRows=0;
       let count = 0;
 
       for (const childId of Object.keys(importedData)) {
@@ -440,6 +515,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
               isVerified: false
             };
             payload.externalInfo = payload.content.externalInfo || "";
+            appendDocumentAudit(batch,{officeId:selectedOfficeId,book:'implementation',childId,month:currentMonth,operation:'療育結果の一括登録'},[{date:dateKey,field:'療育を行った結果',action:'変更'}]);
             batch.update(existingRef, payload);
           } else {
             const newRef = doc(collection(db, 'daily_reports'));
@@ -457,6 +533,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
             };
             payload.externalInfo = externalInfo;
             payload.archived = false;
+            appendDocumentAudit(batch,{officeId:selectedOfficeId,book:'implementation',childId,month:currentMonth,operation:'療育結果の一括登録'},[{date:dateKey,field:'療育を行った結果',action:'追加'}]);
             batch.set(newRef, payload);
           }
 
@@ -494,14 +571,16 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
           const childTreeRefPref = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, `${selectedOfficeId}_${formattedDate}`);
           batch.set(childTreeRefPref, childTreeDoc, { merge: true });
 
-          count++;
+          count++;batchRows++;
+          if(batchRows>=50){await batch.commit();batch=writeBatch(db);batchRows=0;}
         }
       }
 
-      await batch.commit();
+      if(batchRows)await batch.commit();
       alert(`計 ${count}件の療育結果をFirestoreに一括保存しました。`);
       setIsResultImportOpen(false);
       
+      invalidateMonthlyTreeCommunications(selectedOfficeId,currentMonth);
       await fetchData();
     } catch (err: any) {
       console.error(err);
@@ -512,8 +591,15 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
   };
 
   // データ取得処理
+  const childrenForReads=useRef(childrenData);childrenForReads.current=childrenData;
+  const childrenReadKey=JSON.stringify(childrenData.map(child=>[child.id,child.offices]));
   const fetchData = useCallback(async () => {
-    if (childrenData.length === 0) return;
+    const childrenData=childrenForReads.current;
+    if (childrenData.length === 0) { setIsLoading(false); setMonthlyReadError(''); return; }
+    const readScope = `${selectedOfficeId}_${currentMonth}`;
+    if (monthlyReadInFlight.current === readScope) return;
+    monthlyReadInFlight.current = readScope;
+    setMonthlyReadError('');
     setIsLoading(true);
     
     try {
@@ -523,13 +609,15 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
         where('planMonth', '==', currentMonth),
         where('officeId', '==', selectedOfficeId)
       );
-      const dailySnap = await getDocs(dailyQuery);
+      const dailySnap = await measureRead('実施状況・当月の日報',getDocs(dailyQuery));
       
       const reportsGrouped: Record<string, Record<string, any>> = {};
       dailySnap.docs.forEach(docSnap => {
         const data = docSnap.data();
         const childId = data.childId;
         if (!childId) return;
+        const child = childrenData.find(child => child.id === childId);
+        if (!child || !excelExportOfficePriority(data, docSnap.id, child, selectedOfficeId, currentMonth)) return;
 
         let dateStr = "";
         let dObj: Date | null = null;
@@ -638,10 +726,14 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
             data.children.forEach((childItem: any) => {
               if (!childItem || !childItem.id) return;
               const cId = childItem.id;
+              const child = childrenData.find(child => child.id === cId);
+              if (!child || !excelExportOfficePriority(data, d.id, child, selectedOfficeId, currentMonth)) return;
               const tableItem = (data.dailyTable && typeof data.dailyTable === 'object') ? data.dailyTable[cId] : null;
+              if ((childItem.officeId || childItem.office) && !excelExportOfficePriority(childItem, d.id, child, selectedOfficeId, currentMonth)) return;
+              if ((tableItem?.officeId || tableItem?.office) && !excelExportOfficePriority(tableItem, d.id, child, selectedOfficeId, currentMonth)) return;
 
-              const isAbsent = childItem.isAbsent === true;
-              const isWaitlist = childItem.isWaitlist === true;
+              const isAbsent = childItem.isAbsent === true || tableItem?.isAbsent === true;
+              const isWaitlist = childItem.isWaitlist === true || tableItem?.isWaitlist === true;
 
               if (!attendanceDataMap[cId]) {
                 attendanceDataMap[cId] = {};
@@ -665,21 +757,13 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
             if (!child.id) return;
             const childResult = data.results?.[child.id];
             if (childResult) {
+              if (!excelExportOfficePriority(data, d.id, child, selectedOfficeId, currentMonth)) return;
               // reportsに出席児童一覧がある場合、その児童が含まれているか確認
               if (Array.isArray(data.children) && data.children.length > 0) {
                 const isChildInDailyAttendance = data.children.some((c: any) => c?.id === child.id);
                 if (!isChildInDailyAttendance) {
                   return;
                 }
-              }
-
-              const childOfficeTags = Array.isArray(child.offices)
-                ? child.offices
-                : typeof child.offices === 'string'
-                  ? [child.offices]
-                  : [];
-              if (childOfficeTags.length > 1 && !docOfficeId && !data.officeId && !data.office) {
-                return;
               }
 
               if (childResult.D) {
@@ -718,11 +802,13 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
       // 3. 各児童の tree_communications サブコレクション取得
       await Promise.all(childrenData.map(async (child) => {
         if (!child.id) return;
+        const dates = summaryTreeReadDates(currentMonth, attendanceDataMap[child.id], reportsGrouped[child.id]);
+        if (!dates.length) return;
         try {
-          const treeCommRef = collection(db, 'children', child.id, 'app_categories', '書類管理', 'tree_communications');
-          const snap = await getDocs(treeCommRef);
+          const snap = await getMonthlyTreeCommunications(child.id, selectedOfficeId, currentMonth, dates);
           snap.forEach(d => {
             const data = d.data();
+            if (!excelExportOfficePriority(data, d.id, child, selectedOfficeId, currentMonth)) return;
             const parts = d.id.split('_');
             let docOfficeId: string | null = null;
             let dateStr = d.id;
@@ -744,14 +830,6 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
             }
 
             // 2. 複数所属の児童で、事業所情報が一切無いデータは混同回避のためスキップ
-            const childOfficeTags = Array.isArray(child.offices)
-              ? child.offices
-              : typeof child.offices === 'string'
-                ? [child.offices]
-                : [];
-            if (childOfficeTags.length > 1 && !docOfficeId && !data.officeId && !data.office) {
-              return;
-            }
 
             const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
             if (match) {
@@ -793,9 +871,11 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
           });
         } catch (err) {
           console.error(`Failed to fetch tree_communications for child ${child.id}:`, err);
+          throw err;
         }
       }));
 
+      if (adoptionScope.current !== readScope) return;
       setMergedData({
         dailyReports: reportsGrouped,
         treeCommTexts: treeCommTextMap,
@@ -823,10 +903,12 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
         });
       });
       setSelectedDaysMap(initialSelected);
+      setSavedSelectedDaysMap(initialSelected);
 
       // 4. 事業所サマリー設定の取得
       try {
         const settingsSnap = await getDoc(doc(db, 'officeSummarySettings', selectedOfficeId));
+        if (adoptionScope.current !== readScope) return;
         if (settingsSnap.exists()) {
           const data = settingsSnap.data();
           setSummarySettings({
@@ -834,6 +916,10 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
             individualDaysOfWeek: data.individualDaysOfWeek || [],
             holidayColor: data.holidayColor || '#ffe4e6',
             individualColor: data.individualColor || '#e0f2fe',
+            focusHighlightEnabled: data.focusHighlightEnabled !== false,
+            tableOrientation: data.tableOrientation === 'children-rows' ? 'children-rows' : 'children-columns',
+            staffDisplayMode: ['icon', 'icon-name', 'name'].includes(data.staffDisplayMode) ? data.staffDisplayMode : 'icon-name',
+            hiddenCountRows: Array.isArray(data.hiddenCountRows) ? data.hiddenCountRows.filter((label: unknown) => typeof label === 'string' && ['出席日数', '必要日数', '個別以外'].includes(label)) : [],
           });
         } else {
           setSummarySettings({
@@ -841,42 +927,43 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
             individualDaysOfWeek: [],
             holidayColor: '#ffe4e6',
             individualColor: '#e0f2fe',
+    hiddenCountRows: [] as string[],
+    focusHighlightEnabled: true,
+    staffDisplayMode: 'icon-name' as StaffDisplayMode,
+    tableOrientation: 'children-columns' as SummaryTableOrientation,
           });
         }
       } catch (err) {
         console.error("Error fetching summary settings:", err);
+        throw err;
       }
     } catch (error) {
       console.error("Error fetching monthly data:", error);
+      if (adoptionScope.current === readScope) setMonthlyReadError(describeReadError(error));
     } finally {
-      setIsLoading(false);
+      if (adoptionScope.current === readScope) setIsLoading(false);
+      if (monthlyReadInFlight.current === readScope) monthlyReadInFlight.current = '';
     }
-  }, [currentMonth, selectedOfficeId, childrenData, year, month]);
+  }, [currentMonth, selectedOfficeId, childrenReadKey, year, month]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  // 前月・次月移動
-  const handlePrevMonth = () => {
-    const d = new Date(year, month - 2, 1);
-    setCurrentMonth(d.toISOString().slice(0, 7));
-  };
+  useEffect(() => {
+    if (!isSettingsOpen && settingsDataChanged) {
+      setSettingsDataChanged(false);
+      void fetchData();
+    }
+  }, [isSettingsOpen, settingsDataChanged, fetchData]);
 
-  const handleNextMonth = () => {
-    const d = new Date(year, month, 1);
-    setCurrentMonth(d.toISOString().slice(0, 7));
-  };
-
-  // セルの判定ロジック（記号表示 + 出席予定日の太枠強調）
+  // 採用日は緑枠、出席予定は〇、今後の予定ありは◎を優先表示
   const getCellDetails = (childId: string, day: number) => {
     const dateKey = `${monthNum}月${day}日`;
     
     // 出席情報（選択中事業所の出席予定）
     const att = mergedData.attendance[childId]?.[dateKey];
     const isAttending = !!(att && att.officeId === selectedOfficeId && !att.isAbsent && !att.isWaitlist);
-    const isAbsent = !!(att && att.officeId === selectedOfficeId && att.isAbsent);
-    const isWaitlist = !!(att && att.officeId === selectedOfficeId && att.isWaitlist);
 
     // 記録情報（該当事業所の出席日、または当事業所の日報がある日のみツリー通信をセルに反映）
     const report = mergedData.dailyReports[childId]?.[dateKey];
@@ -886,92 +973,27 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
     const treeText = isRelevantDay ? (mergedData.treeCommTexts[childId]?.[dateKey] || "") : "";
     const treeFuture = isRelevantDay ? (mergedData.treeCommFutures[childId]?.[dateKey] || "") : "";
 
-    const resultInfo = report?.content?.resultInfo || "";
     const futurePlan = report?.content?.futurePlan || treeFuture || "";
     const externalInfo = report?.content?.externalInfo || treeText || "";
 
-    const hasResult = resultInfo.trim() !== "";
     const hasFuture = futurePlan.trim() !== "";
     const hasTree = externalInfo.trim() !== "" && isRelevantDay;
 
-    // 正式採用・アーカイブの判定（出席していない日・欠席日は絶対に採用扱いにしない）
-    const isReportArchived = report?.archived === true;
-    const isAdopted = isAttending && (
-      (childId && selectedDaysMap[childId]) 
-        ? selectedDaysMap[childId].has(day)
-        : (isReportSaved && !isReportArchived)
-    );
+    const isAdopted = isAttending && (selectedDaysMap[childId]?.has(day) ?? false);
+    const isReportArchived = !isAdopted && (hasTree || report?.archived === true);
 
-    // 出席情報ツールチップ
-    let attTooltip = "";
-    if (isAttending) {
-      const timeStr = (att.transportTime || att.endTime) 
-        ? `${att.transportTime || '--:--'}〜${att.endTime || '--:--'}`
-        : '';
-      const parts = [
-        `【${officeName} 出席予定】`,
-        timeStr ? `時間: ${timeStr}` : null,
-        att.pickupLocation ? `送迎: ${att.pickupLocation}` : null,
-        att.assignedStaff ? `担当: ${att.assignedStaff}` : null
-      ].filter(Boolean);
-      attTooltip = parts.join(' / ') + '\n\n';
-    } else if (isAbsent) {
-      attTooltip = `【${officeName} 欠席】\n\n`;
-    } else if (isWaitlist) {
-      attTooltip = `【${officeName} キャンセル待ち】\n\n`;
-    }
-
-    // 正式採用ステータスツールチップ
-    let adoptionTooltip = "";
-    if (isAdopted) {
-      adoptionTooltip = "【専門的支援: 正式採用】\n";
-    } else if (isReportArchived) {
-      adoptionTooltip = "【専門的支援: アーカイブ】\n";
-    }
-
-    // 出席予定日は太枠（ring-2 ring-inset ring-primary）で強調
-    const borderClass = isAttending 
-      ? "ring-2 ring-inset ring-primary font-bold z-[1]" 
-      : "";
-
-    // 記録進捗の記号とスタイリング
-    let content: React.ReactNode = "";
-    let baseClass = "hover:bg-slate-50";
-    let recordTooltip = "支援記録なし";
-
-    // 他アプリ等で欠席となった児童は「✕」を表示
-    if (isAbsent) {
-      content = "✕";
-      baseClass = "text-rose-500 font-bold bg-rose-50/40 hover:bg-rose-100/60";
-      recordTooltip = `【欠席】${hasResult ? `\n療育結果:\n${resultInfo}` : ''}${hasFuture ? `\n今後の予定:\n${futurePlan}` : ''}`;
-    } else if (hasResult && hasFuture) {
-      content = "◎";
-      baseClass = "text-green-600 font-bold bg-green-50/30 hover:bg-green-100/50";
-      recordTooltip = `療育結果:\n${resultInfo}\n\n今後の予定:\n${futurePlan}`;
-    } else if (hasResult && !hasFuture) {
-      content = "△";
-      baseClass = "text-amber-500 font-bold bg-amber-50/30 hover:bg-amber-100/50";
-      recordTooltip = `療育結果:\n${resultInfo}\n\n※今後の予定は未記入`;
-    } else if (!hasResult && hasFuture) {
-      content = "◯";
-      baseClass = "text-blue-600 font-bold bg-blue-50/30 hover:bg-blue-100/50";
-      recordTooltip = `今後の予定:\n${futurePlan}\n\n※療育結果は未記入`;
-    } else if (!hasResult && !hasFuture && hasTree) {
-      content = "✉️";
-      baseClass = "bg-red-100 text-red-600 font-semibold hover:bg-red-200/80 transition-colors animate-pulse";
-      recordTooltip = `ツリー通信のみあり（どちらも未記入）:\n${externalInfo}`;
-    }
-
-    // 出席予定があるが記録がまだ未記入の場合、薄いprimary背景で視認性を上げる
-    if (isAttending && !content) {
-      baseClass = "bg-primary/[0.04] hover:bg-primary/[0.08]";
-    }
-
+    const borderClass = isAdopted ? "ring-2 ring-inset ring-emerald-600 font-bold z-[1]" : "";
+    const content = <>
+      {hasFuture
+        ? <span aria-label="今後の予定あり">◎</span>
+        : isAttending ? <span aria-label="出席予定あり">〇</span> : null}
+    </>;
+    const baseClass = hasFuture ? "text-green-600 font-bold hover:bg-green-50/50" : "hover:bg-slate-50";
     return {
       content,
       className: `${baseClass} ${borderClass}`.trim(),
-      tooltip: `${adoptionTooltip}${attTooltip}${recordTooltip}`.trim(),
       isAttending,
+      hasFuture,
       isAdopted,
       isReportSaved,
       isReportArchived
@@ -1019,44 +1041,16 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
   // 児童のその月の出席日数（総出席、個別療育出席、個別以外出席）の計算
   const getChildAttendanceDetails = useCallback((childId: string) => {
-    let totalCount = 0;
-    let individualCount = 0;
-
-    daysArray.forEach(day => {
-      const dateKey = `${monthNum}月${day}日`;
-      const att = mergedData.attendance[childId]?.[dateKey];
-      const isAttending = !!(att && att.officeId === selectedOfficeId && !att.isAbsent && !att.isWaitlist);
-      const rep = mergedData.dailyReports[childId]?.[dateKey];
-      const hasReport = !!(rep?.content?.resultInfo?.trim() && !rep?.archived);
-      if (isAttending || hasReport) {
-        totalCount++;
-        const dObj = new Date(year, month - 1, day);
-        const dayOfWeek = dObj.getDay();
-        if (summarySettings.individualDaysOfWeek.includes(dayOfWeek)) {
-          individualCount++;
-        }
-      }
-    });
-
-    const nonIndividualCount = Math.max(0, totalCount - individualCount);
-    return { totalCount, individualCount, nonIndividualCount };
-  }, [daysArray, monthNum, mergedData, selectedOfficeId, year, month, summarySettings.individualDaysOfWeek]);
+    return countSummaryAttendance(daysArray, monthNum, selectedOfficeId, mergedData.attendance[childId],
+      day => summarySettings.individualDaysOfWeek.includes(new Date(year, month - 1, day).getDay()));
+  }, [daysArray, monthNum, mergedData.attendance, selectedOfficeId, year, month, summarySettings.individualDaysOfWeek]);
 
   // 必要日数の計算
-  // 出席数が1未満の時は必要数はその数字のまま（0）
+  // 出席0日は0、1日は1。
   // 放デイ（小学生以上）：出席12日以上で6日分、出席6～12未満で4日分、出席6日未満で2日分（0日なら0）
   // 児発（幼児以下）：出席12日以上で6回、出席12日未満で4回（0日なら0）
   const getChildRequiredDays = useCallback((child: Child, attCount: number): number => {
-    if (attCount < 1) return attCount;
-    const isHoukago = isChildHoukagoDay(child);
-    if (isHoukago) {
-      if (attCount >= 12) return 6;
-      if (attCount >= 6) return 4;
-      return 2;
-    } else {
-      if (attCount >= 12) return 6;
-      return 4;
-    }
+    return requiredSummaryDays(attCount, isChildHoukagoDay(child));
   }, [isChildHoukagoDay]);
 
   // 全児童の当月出席日数および必要日数の集計マップ
@@ -1091,190 +1085,74 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
     return stats;
   }, [childrenData, getChildAttendanceDetails, isChildHoukagoDay, getChildRequiredDays]);
 
-  // 個別以外の日数の均等分配（児童単位の不可分ルールを厳守）
+  const orderedChildren = useMemo(() => {
+    const attendingToday = new Set<string>();
+    if (currentMonth === today.slice(0, 7)) {
+      const todayKey = `${Number(today.slice(5, 7))}月${Number(today.slice(8, 10))}日`;
+      childrenData.forEach(child => {
+        if (!child.id) return;
+        const att = mergedData.attendance[child.id]?.[todayKey];
+        if (att?.officeId === selectedOfficeId && !att.isAbsent && !att.isWaitlist) attendingToday.add(child.id);
+      });
+    }
+    return orderSummaryChildren(childrenData, childOrder, {
+      assignedStaff: assignedStaffMap, staff: staffList, attendanceCounts: childAttendanceStats, attendingToday
+    });
+  }, [childrenData, childOrder, assignedStaffMap, staffList, childAttendanceStats, mergedData.attendance, selectedOfficeId, currentMonth, today]);
+
+  const ownStaffId=resolveOwnStaffId(staffList,auth.currentUser?.uid||'',loginStaffName);
+  const staffFilterReady=staffAssignmentLoadedScope===selectedOfficeId+'_'+currentMonth;
+  const sortedChildren=useMemo(()=>staffFilter!=='all'&&!staffFilterReady?[]:filterSummaryStaff(orderedChildren,assignedStaffMap,staffFilter,ownStaffId),[orderedChildren,assignedStaffMap,staffFilter,ownStaffId,staffFilterReady]);
+
+  // 割り振り用の記入数。採用日や表の必要日数そのものは変更しない。
+  const childAdoptedDayCounts = useMemo(() => Object.fromEntries(childrenData.filter(child => child.id).map(child => {
+    const counts = countSummaryAttendance([...(selectedDaysMap[child.id!] || [])], monthNum, selectedOfficeId, mergedData.attendance[child.id!],
+      day => summarySettings.individualDaysOfWeek.includes(new Date(year, month - 1, day).getDay()));
+    return [child.id!, counts];
+  })), [childrenData, selectedDaysMap, mergedData.attendance, monthNum, selectedOfficeId, year, month, summarySettings.individualDaysOfWeek]);
+  const individualOnlyChildren = useMemo(() => Object.entries(childAdoptedDayCounts)
+    .filter(([, counts]) => counts.totalCount > 0 && counts.nonIndividualCount === 0).map(([id]) => id), [childAdoptedDayCounts]);
+  const childWritingDays = useMemo(() => Object.fromEntries(Object.entries(childAdoptedDayCounts).map(([id, counts]) =>
+    [id, counts.nonIndividualCount === 0 ? 0 : excludeIndividualWritingDays ? counts.nonIndividualCount : counts.totalCount]
+  )), [childAdoptedDayCounts, excludeIndividualWritingDays]);
+
+  const staffWritingSummary = useMemo(() => summarizeStaffWritingDays(childAttendanceStats, assignedStaffMap), [childAttendanceStats, assignedStaffMap]);
+  const staffWritingRows = useMemo(() => [
+    ...staffList.map(staff => ({...staff, ...(staffWritingSummary[staff.id] || {childCount: 0, days: 0})})),
+    ...Object.keys(staffWritingSummary).filter(id => id && !staffList.some(staff => staff.id === id)).map(id => ({id, name: '未登録スタッフ', color: '#94a3b8', ...staffWritingSummary[id]})),
+    {id: '', name: '未割り当て', color: '#94a3b8', ...(staffWritingSummary[''] || {childCount: 0, days: 0})},
+  ], [staffList, staffWritingSummary]);
+  const handleClearStaffAssignments = async () => {
+    const scope = `${selectedOfficeId}_${currentMonth}`;
+    if (isSavingStaffAssignments || staffAssignmentLoadedScope !== scope) return;
+    setIsSavingStaffAssignments(true);
+    setStaffActionError('');
+    try {
+      const batch=writeBatch(db);batch.set(doc(db,'offices',selectedOfficeId,'monthly_staff_assignments',currentMonth),{assignments:{},updatedAt:serverTimestamp()},{mergeFields:['assignments','updatedAt']});logStaffAssignments(batch,assignedStaffMap,{});await batch.commit();
+      if (adoptionScope.current === scope) {
+        setAssignedStaffMap({});
+        setIsClearStaffOpen(false);
+      }
+    } catch {
+      if (adoptionScope.current === scope) setStaffActionError('担当の全解除に失敗しました。もう一度お試しください。');
+    } finally {
+      setIsSavingStaffAssignments(false);
+    }
+  };
+
+  const distributionPreview = useMemo(() => distributeStaffWorkload(
+    orderedChildren.filter(child => child.id && childWritingDays[child.id] > 0).map(child => ({ id: child.id!, days: childWritingDays[child.id!] })),
+    [...selectedStaffForDist], groupAdjacentColumns, previousStaffAssignments
+  ), [orderedChildren, childWritingDays, selectedStaffForDist, groupAdjacentColumns, previousStaffAssignments]);
+  const distributionTotals = Object.values(distributionPreview).map(bucket => bucket.totalDays);
+  const distributionRange = distributionTotals.length ? Math.max(...distributionTotals) - Math.min(...distributionTotals) : 0;
+  const hasStaffDistributionChanges = distributionTotals.some(days => days > 0) || individualOnlyChildren.some(id => assignedStaffMap[id]);
+
   const handleDistributeRequiredDays = useCallback(async () => {
-    if (selectedStaffForDist.size === 0) {
-      alert("分配対象のスタッフを少なくとも1名選択してください。");
-      return;
-    }
-
-    const participatingStaffIds = Array.from(selectedStaffForDist);
-    // 対象児童と「個別以外の日数」のリスト（個別以外の日数 > 0 の児童）
-    // childrenData の並び順（表の列順）をそのまま保持
-    const orderedChildItems: { id: string; name: string; nonIndDays: number }[] = [];
-    childrenData.forEach(child => {
-      if (!child.id) return;
-      const stat = childAttendanceStats[child.id];
-      const nonInd = stat?.nonIndividualCount ?? 0;
-      if (nonInd > 0) {
-        orderedChildItems.push({
-          id: child.id,
-          name: child.fullName || '(名前なし)',
-          nonIndDays: nonInd
-        });
-      }
-    });
-
-    if (orderedChildItems.length === 0) {
-      alert("分配対象となる「個別以外の日数」を持つ児童がいません。");
-      return;
-    }
-
-    // 各スタッフの担当バケット
-    const staffBuckets: Record<string, { childIds: string[]; totalDays: number }> = {};
-    participatingStaffIds.forEach(id => {
-      staffBuckets[id] = { childIds: [], totalDays: 0 };
-    });
-
-    if (groupAdjacentColumns) {
-      // ---- オプション有効: 表の並び順（列）で近くの児童をなるべくまとめる ----
-      const totalAllDays = orderedChildItems.reduce((acc, c) => acc + c.nonIndDays, 0);
-      const targetDaysPerStaff = totalAllDays / participatingStaffIds.length;
-
-      let currentStaffIdx = 0;
-      orderedChildItems.forEach((child) => {
-        const currentSid = participatingStaffIds[currentStaffIdx];
-        const nextStaffIdx = currentStaffIdx + 1;
-        const currentTotal = staffBuckets[currentSid].totalDays;
-
-        // 次のスタッフが存在し、現在のスタッフが既に目標以上、あるいは次のスタッフに移った方が目標に近い場合
-        if (nextStaffIdx < participatingStaffIds.length && currentTotal >= targetDaysPerStaff && staffBuckets[currentSid].childIds.length > 0) {
-          currentStaffIdx = nextStaffIdx;
-        }
-
-        const sid = participatingStaffIds[currentStaffIdx];
-        staffBuckets[sid].childIds.push(child.id);
-        staffBuckets[sid].totalDays += child.nonIndDays;
-      });
-
-      // 隣接スタッフ間での境界調整（列のまとまりを維持したまま、差を最小化）
-      let adjusted = true;
-      let passes = 0;
-      while (adjusted && passes < 30) {
-        adjusted = false;
-        passes++;
-        for (let i = 0; i < participatingStaffIds.length - 1; i++) {
-          const s1 = participatingStaffIds[i];
-          const s2 = participatingStaffIds[i + 1];
-          const b1 = staffBuckets[s1];
-          const b2 = staffBuckets[s2];
-          const diff = Math.abs(b1.totalDays - b2.totalDays);
-
-          // s1の最後の児童をs2に移動して差が縮まるか
-          if (b1.childIds.length > 1) {
-            const lastChildId = b1.childIds[b1.childIds.length - 1];
-            const childDays = orderedChildItems.find(c => c.id === lastChildId)!.nonIndDays;
-            const newDiff = Math.abs((b1.totalDays - childDays) - (b2.totalDays + childDays));
-            if (newDiff < diff) {
-              b1.childIds.pop();
-              b1.totalDays -= childDays;
-              b2.childIds.unshift(lastChildId);
-              b2.totalDays += childDays;
-              adjusted = true;
-              continue;
-            }
-          }
-
-          // s2の最初の児童をs1に移動して差が縮まるか
-          if (b2.childIds.length > 1) {
-            const firstChildId = b2.childIds[0];
-            const childDays = orderedChildItems.find(c => c.id === firstChildId)!.nonIndDays;
-            const newDiff = Math.abs((b1.totalDays + childDays) - (b2.totalDays - childDays));
-            if (newDiff < diff) {
-              b2.childIds.shift();
-              b2.totalDays -= childDays;
-              b1.childIds.push(firstChildId);
-              b1.totalDays += childDays;
-              adjusted = true;
-              continue;
-            }
-          }
-        }
-      }
-    } else {
-      // ---- オプション無効: 純粋な均等度最優先（LPT + 局所探索） ----
-      const sortedItems = [...orderedChildItems].sort((a, b) => b.nonIndDays - a.nonIndDays);
-
-      sortedItems.forEach(child => {
-        let minStaffId = participatingStaffIds[0];
-        let minDays = staffBuckets[minStaffId].totalDays;
-
-        for (let i = 1; i < participatingStaffIds.length; i++) {
-          const sid = participatingStaffIds[i];
-          if (staffBuckets[sid].totalDays < minDays) {
-            minDays = staffBuckets[sid].totalDays;
-            minStaffId = sid;
-          }
-        }
-
-        staffBuckets[minStaffId].childIds.push(child.id);
-        staffBuckets[minStaffId].totalDays += child.nonIndDays;
-      });
-
-      let improved = true;
-      let loopCount = 0;
-      while (improved && loopCount < 100) {
-        improved = false;
-        loopCount++;
-
-        let maxStaffId = participatingStaffIds[0];
-        let minStaffId = participatingStaffIds[0];
-        participatingStaffIds.forEach(sid => {
-          if (staffBuckets[sid].totalDays > staffBuckets[maxStaffId].totalDays) maxStaffId = sid;
-          if (staffBuckets[sid].totalDays < staffBuckets[minStaffId].totalDays) minStaffId = sid;
-        });
-
-        const currentDiff = staffBuckets[maxStaffId].totalDays - staffBuckets[minStaffId].totalDays;
-        if (currentDiff <= 1) break;
-
-        // 移動テスト
-        for (const cId of staffBuckets[maxStaffId].childIds) {
-          const days = orderedChildItems.find(c => c.id === cId)!.nonIndDays;
-          const newDiff = Math.abs((staffBuckets[maxStaffId].totalDays - days) - (staffBuckets[minStaffId].totalDays + days));
-          if (newDiff < currentDiff) {
-            staffBuckets[maxStaffId].childIds = staffBuckets[maxStaffId].childIds.filter(id => id !== cId);
-            staffBuckets[maxStaffId].totalDays -= days;
-            staffBuckets[minStaffId].childIds.push(cId);
-            staffBuckets[minStaffId].totalDays += days;
-            improved = true;
-            break;
-          }
-        }
-        if (improved) continue;
-
-        // 交換テスト
-        for (const cIdMax of staffBuckets[maxStaffId].childIds) {
-          const daysMax = orderedChildItems.find(c => c.id === cIdMax)!.nonIndDays;
-          for (const cIdMin of staffBuckets[minStaffId].childIds) {
-            const daysMin = orderedChildItems.find(c => c.id === cIdMin)!.nonIndDays;
-            if (daysMax > daysMin) {
-              const change = daysMax - daysMin;
-              const newDiff = Math.abs((staffBuckets[maxStaffId].totalDays - change) - (staffBuckets[minStaffId].totalDays + change));
-              if (newDiff < currentDiff) {
-                staffBuckets[maxStaffId].childIds = staffBuckets[maxStaffId].childIds.filter(id => id !== cIdMax);
-                staffBuckets[maxStaffId].childIds.push(cIdMin);
-                staffBuckets[maxStaffId].totalDays -= change;
-
-                staffBuckets[minStaffId].childIds = staffBuckets[minStaffId].childIds.filter(id => id !== cIdMin);
-                staffBuckets[minStaffId].childIds.push(cIdMax);
-                staffBuckets[minStaffId].totalDays += change;
-
-                improved = true;
-                break;
-              }
-            }
-          }
-          if (improved) break;
-        }
-      }
-    }
-
-    const newAssignments: Record<string, string> = { ...assignedStaffMap };
-    participatingStaffIds.forEach(sid => {
-      staffBuckets[sid].childIds.forEach(cid => {
-        newAssignments[cid] = sid;
-      });
-    });
+    if (selectedStaffForDist.size === 0 || isSavingStaffAssignments || staffAssignmentLoadedScope !== `${selectedOfficeId}_${currentMonth}`) return;
+    const staffBuckets = distributionPreview;
+    if (!hasStaffDistributionChanges) return;
+    const newAssignments = applyStaffDistribution(assignedStaffMap, staffBuckets, individualOnlyChildren);
 
     setAssignedStaffMap(newAssignments);
     setIsDistributeModalOpen(false);
@@ -1282,138 +1160,22 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
     try {
       setIsSavingStaffAssignments(true);
       const assignDocRef = doc(db, 'offices', selectedOfficeId, 'monthly_staff_assignments', currentMonth);
-      await setDoc(assignDocRef, {
-        assignments: newAssignments,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
+      const batch=writeBatch(db);batch.set(assignDocRef,{assignments:newAssignments,distributionOptions:{excludeIndividualDays:excludeIndividualWritingDays},updatedAt:serverTimestamp()},{mergeFields:['assignments','distributionOptions.excludeIndividualDays','updatedAt']});logStaffAssignments(batch,assignedStaffMap,newAssignments);await batch.commit();
     } catch (e) {
       console.error("Failed to save distributed staff assignments:", e);
     } finally {
       setIsSavingStaffAssignments(false);
     }
-  }, [selectedStaffForDist, childrenData, childAttendanceStats, groupAdjacentColumns, assignedStaffMap, selectedOfficeId, currentMonth]);
+  }, [selectedStaffForDist, distributionPreview, isSavingStaffAssignments, assignedStaffMap, selectedOfficeId, currentMonth, staffAssignmentLoadedScope, excludeIndividualWritingDays, hasStaffDistributionChanges, individualOnlyChildren]);
 
-  // セルホバー時の専門的支援実施計画プレビュー表示ハンドラ
-  const handleCellMouseEnter = useCallback((
-    e: React.MouseEvent<HTMLElement>,
-    child: Child,
-    day: number
-  ) => {
-    if (!child.id) return;
-
-    // ホバーされている児童列と日付行を常に追跡
-    setHoveredColChildId(child.id);
+  const handleCellMouseEnter = useCallback((child: Child, day: number) => {
+    setHoveredColChildId(child.id || null);
     setHoveredRowDay(day);
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const dateKey = `${monthNum}月${day}日`;
-    // 出席情報
-    const att = mergedData.attendance[child.id]?.[dateKey];
-    const isAttending = !!(att && att.officeId === selectedOfficeId && !att.isAbsent && !att.isWaitlist);
-
-    // 出席していないマスはプレビューウィンドウを表示しない
-    if (!isAttending) {
-      setHoveredCellPreview(null);
-      return;
-    }
-
-    const { dayStr } = getDayOfWeekDetails(day);
-
-    const report = mergedData.dailyReports[child.id]?.[dateKey];
-    const treeFuture = mergedData.treeCommFutures[child.id]?.[dateKey] || "";
-    const supportContent: string[] = report?.content?.supportContent || [];
-    const resultInfo: string = report?.content?.resultInfo || "";
-    const futurePlan: string = report?.content?.futurePlan || treeFuture || "";
-    const isReportArchived = report?.archived === true;
-    
-    // 日報の作成者（アーカイブされている場合は参照しない）
-    const reportStaffName = (!isReportArchived && (report?.staffName || report?.staffId)) ? (report.staffName || report.staffId) : "";
-
-    // 児童の担当スタッフ（表上部で割り当てられたスタッフ）
-    const assignedStaffId = child.id ? assignedStaffMap[child.id] : null;
-    const assignedStaffMember = assignedStaffId ? staffList.find(s => s.id === assignedStaffId) : null;
-    const assignedStaffName = assignedStaffMember ? assignedStaffMember.name : "";
-    const assignedStaffColor = assignedStaffMember ? assignedStaffMember.color : undefined;
-
-    // 表示用スタッフ名
-    const staffName = assignedStaffName || reportStaffName;
-
-    const isAdopted = isAttending && (
-      (child.id && selectedDaysMap[child.id])
-        ? selectedDaysMap[child.id].has(day)
-        : (!!report?.id && !isReportArchived)
-    );
-
-    let attInfoStr = "";
-    if (isAttending) {
-      const parts = [
-        (att.transportTime || att.endTime) ? `${att.transportTime || '--:--'}〜${att.endTime || '--:--'}` : null,
-        att.pickupLocation ? `送迎:${att.pickupLocation}` : null,
-        att.assignedStaff ? `送迎等担当:${att.assignedStaff}` : null
-      ].filter(Boolean);
-      attInfoStr = parts.length > 0 ? parts.join(' | ') : "出席予定";
-    }
-
-    // ポップオーバーの配置座標（幅660px、高さ約220px想定）
-    const cardWidth = 660;
-    const cardHeight = 220;
-    
-    // 水平位置: 画面右にはみ出る場合は左側に表示
-    let x = rect.right + 12;
-    if (x + cardWidth > window.innerWidth - 16) {
-      x = Math.max(16, rect.left - cardWidth - 12);
-    }
-
-    // 垂直位置:
-    // 上部のマス（日数表ヘッダー付近）にいる場合は、マスの下に表示して日数表の裏潜りや被りを防ぐ
-    let y = rect.top - 15;
-    if (rect.top < 300) {
-      y = rect.bottom + 8;
-    } else if (y + cardHeight > window.innerHeight - 16) {
-      y = Math.max(16, window.innerHeight - cardHeight - 16);
-    }
-    if (y < 16) y = 16;
-
-    setHoveredCellPreview({
-      childName: child.fullName,
-      dateStr: dateKey,
-      dayOfWeekStr: dayStr,
-      supportContent,
-      resultInfo,
-      futurePlan,
-      staffName,
-      reportStaffName,
-      assignedStaffName,
-      assignedStaffColor,
-      isAdopted,
-      isReportArchived,
-      isAttending,
-      attInfoStr,
-      x,
-      y
-    });
-  }, [monthNum, mergedData, selectedOfficeId, selectedDaysMap, assignedStaffMap, staffList]);
-
-  const handleCellMouseLeave = useCallback(() => {
-    setHoveredCellPreview(null);
-    setHoveredColChildId(null);
-    setHoveredRowDay(null);
   }, []);
 
-  // マスの選択/解除トグル
-  const toggleDaySelection = useCallback((childId: string, day: number) => {
-    setSelectedDaysMap(prev => {
-      const childSet = new Set(prev[childId] || []);
-      if (childSet.has(day)) {
-        childSet.delete(day);
-      } else {
-        childSet.add(day);
-      }
-      return {
-        ...prev,
-        [childId]: childSet
-      };
-    });
+  const handleCellMouseLeave = useCallback(() => {
+    setHoveredColChildId(null);
+    setHoveredRowDay(null);
   }, []);
 
   // 組み合わせ生成ヘルパー (n個からk個選ぶ)
@@ -1444,15 +1206,21 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
   // 2. 採用は最大（マックス）で6日
   // 3. 採用数が上限に達した場合（または達する見込みの場合）、個別の日以外の採用を排除
   // 4. 可能な限り日数の間隔を均等に空けつつ（連日を極力避けて分散）、必要日数を選択
-  const handleAutoSelect = useCallback((targetChildId?: string) => {
-    const targets = targetChildId 
-      ? childrenData.filter(c => c.id === targetChildId) 
-      : childrenData;
-
-    setSelectedDaysMap(prev => {
-      const newSelected = { ...prev };
-
-      targets.forEach(child => {
+  const autoSelectionPreview = useMemo(() => {
+    if (!isAutoSelectOpen || !isAutoSelectGapValid || !isRelaxedGapValid) return null;
+    const excludedWeeks = autoSelectExcludedWeeks;
+    const minimumGap = minimumAutoSelectGap;
+    const newSelected = { ...selectedDaysMap };
+    const details: { id: string; name: string; target: number; initial: number; selected: number; kept: boolean; gap?: number }[] = [];
+    const recordSelection = (child: Child, target: number, initialDays: number[], candidates: AdoptionCandidate[]) => {
+      const resolved = resolveAdoptionShortage({ candidates, target, initialDays,
+        existingDays: [...(selectedDaysMap[child.id!] || [])], policy: shortagePolicy,
+        minimumGap, relaxedMinimumGap: Number(relaxedGap) });
+      newSelected[child.id!] = new Set(resolved.days);
+      if (initialDays.length < target) details.push({ id: child.id!, name: child.fullName, target,
+        initial: initialDays.length, selected: resolved.days.length, kept: resolved.kept, gap: resolved.gap });
+    };
+      childrenData.forEach(child => {
         if (!child.id) return;
         const cId = child.id;
         const stat = childAttendanceStats[cId];
@@ -1482,8 +1250,8 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
           const dayOfWeek = dObj.getDay();
           const isIndividual = summarySettings.individualDaysOfWeek.includes(dayOfWeek);
 
-          // 出席予定、またはすでに何らかの記録・通信がある日を候補とする
-          if (isAttending || hasResult || hasFuture || hasTree) {
+          // 除外週は個別療育日も含めて候補から外す。
+          if (isAutoSelectCandidate(year, month, day, excludedWeeks, isAttending)) {
             if (isIndividual) {
               // 個別療育の日
               individualDays.push(day);
@@ -1499,6 +1267,18 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
             }
           }
         });
+
+        const candidates: AdoptionCandidate[] = [
+          ...individualDays.map(day => ({ day, individual: true, score: 0 })),
+          ...nonIndividualCandidates.map(candidate => ({ ...candidate, individual: false }))
+        ];
+        if (minimumGap !== undefined) {
+          recordSelection(child, targetDaysCount, selectSpacedAdoptionDays([
+            ...individualDays.map(day => ({ day, individual: true, score: 0 })),
+            ...nonIndividualCandidates.map(candidate => ({ ...candidate, individual: false }))
+          ], targetDaysCount, minimumGap), candidates);
+          return;
+        }
 
         // 1. 個別療育の日はすべて必ず採用（ただし最大上限6日）
         individualDays.sort((a, b) => a - b);
@@ -1578,34 +1358,36 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
         // 4. 合計して Set に格納（個別療育日は必ず採用され、上限を超えた場合は個別以外が排除される）
         const finalChosen = [...chosenIndividual, ...chosenNonIndividual].sort((a, b) => a - b);
-        newSelected[cId] = new Set(finalChosen);
+        recordSelection(child, targetDaysCount, finalChosen, candidates);
       });
 
-      return newSelected;
-    });
-  }, [childrenData, childAttendanceStats, daysArray, monthNum, mergedData, selectedOfficeId, year, month, summarySettings.individualDaysOfWeek, getCombinations]);
+      return { daysMap: newSelected, details };
+  }, [childrenData, childAttendanceStats, daysArray, monthNum, mergedData, selectedOfficeId, year, month, summarySettings.individualDaysOfWeek, getCombinations, isAutoSelectOpen, isAutoSelectGapValid, isRelaxedGapValid, autoSelectExcludedWeeks, minimumAutoSelectGap, selectedDaysMap, shortagePolicy, relaxedGap]);
 
   // 選択内容を一括保存（選択マスを正式採用 archived: false、未選択の既存レポートを archived: true）
-  const handleSaveAdoptions = async () => {
+  const handleSaveAdoptions = async (nextSelected: Record<string, Set<number>>) => {
+    if (adoptionSaveInFlight.current || isLoading || monthlyReadError) return;
+    adoptionSaveInFlight.current = true;
+    const scope = `${selectedOfficeId}_${currentMonth}`;
+    setSelectedDaysMap(nextSelected);
+    setAdoptionSaveError('');
     setIsSavingAdoptions(true);
     try {
-      let adoptedCount = 0;
-      let archivedCount = 0;
-      let createdCount = 0;
+      const reportUpdates: Record<string, Record<string, any>> = {};
 
       // writeBatch は1バッチ最大500件までのため、400件単位で分割管理
       let currentBatch = writeBatch(db);
       let opCount = 0;
       const batches: ReturnType<typeof writeBatch>[] = [currentBatch];
 
-      const addOperation = (fn: (b: ReturnType<typeof writeBatch>) => void) => {
-        if (opCount >= 400) {
+      const addOperation = (fn: (b: ReturnType<typeof writeBatch>) => void,cost=1) => {
+        if (opCount+cost > 400) {
           currentBatch = writeBatch(db);
           batches.push(currentBatch);
           opCount = 0;
         }
         fn(currentBatch);
-        opCount++;
+        opCount+=cost;
       };
 
       const pad = (n: number) => n.toString().padStart(2, '0');
@@ -1613,12 +1395,14 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
       for (const child of childrenData) {
         if (!child.id) continue;
         const cId = child.id;
-        const selectedDays = selectedDaysMap[cId] || new Set();
+        const selectedDays = nextSelected[cId] || new Set<number>();
         const childDailyReports = mergedData.dailyReports[cId] || {};
 
         for (const day of daysArray) {
           const dateKey = `${monthNum}月${day}日`;
           const isSelected = selectedDays.has(day);
+          if (isSelected === (savedSelectedDaysMap[cId]?.has(day) ?? false)) continue;
+          if (!reportUpdates[cId]) reportUpdates[cId] = {};
           const existingReport = childDailyReports[dateKey];
           const formattedDate = `${year}-${pad(month)}-${pad(day)}`;
 
@@ -1632,8 +1416,9 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                     archived: false,
                     updatedAt: serverTimestamp()
                   });
-                });
-                adoptedCount++;
+                  appendDocumentAudit(b,{officeId:selectedOfficeId,book:'implementation',childId:cId,month:currentMonth,operation:'採用日変更'},[{date:dateKey,field:'採用日',action:'採用'}]);
+                },2);
+                reportUpdates[cId][dateKey] = { ...existingReport, archived: false };
               }
             } else {
               // 既存ドキュメントがないが正式採用として選択された日 -> 新規作成
@@ -1664,8 +1449,9 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
               addOperation((b) => {
                 b.set(newDocRef, payload);
-              });
-              createdCount++;
+                appendDocumentAudit(b,{officeId:selectedOfficeId,book:'implementation',childId:cId,month:currentMonth,operation:'採用日変更'},[{date:dateKey,field:'採用日',action:'採用'}]);
+              },2);
+              reportUpdates[cId][dateKey] = { ...payload, ...payload.content, id: newDocRef.id };
             }
           } else {
             // 未選択（アーカイブ対象）
@@ -1676,42 +1462,93 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                   archived: true,
                   updatedAt: serverTimestamp()
                 });
-              });
-              archivedCount++;
+                appendDocumentAudit(b,{officeId:selectedOfficeId,book:'implementation',childId:cId,month:currentMonth,operation:'採用日変更'},[{date:dateKey,field:'採用日',action:'解除'}]);
+              },2);
+              reportUpdates[cId][dateKey] = { ...existingReport, archived: true };
             }
           }
         }
       }
 
-      if (opCount > 0 || batches.length > 1) {
-        for (const b of batches) {
-          await b.commit();
-        }
-        alert(`専門的支援の採用設定を保存しました。\n・正式採用（新規作成・復帰含む）: ${adoptedCount + createdCount}件\n・アーカイブ（除外）: ${archivedCount}件`);
-      } else {
-        alert("変更はありませんでした。");
+      for (const batch of batches) await batch.commit();
+      if (adoptionScope.current === scope) {
+        setSavedSelectedDaysMap(nextSelected);
+        setMergedData(prev => {
+          const dailyReports = { ...prev.dailyReports };
+          for (const [childId, reports] of Object.entries(reportUpdates)) {
+            dailyReports[childId] = { ...dailyReports[childId], ...reports };
+          }
+          return { ...prev, dailyReports };
+        });
       }
-
-      await fetchData();
     } catch (err: any) {
-      console.error("Failed to save adoptions:", err);
-      alert(`保存中にエラーが発生しました: ${err.message || String(err)}`);
+      console.error('Failed to save adoptions:', err);
+      if (adoptionScope.current === scope) {
+        setSelectedDaysMap(savedSelectedDaysMap);
+        setAdoptionSaveError('採用日を保存できませんでした。通信状態を確認し、もう一度操作してください。');
+        // 分割保存の途中で失敗した場合も、保存済みの状態に合わせる。
+        void fetchData();
+      }
     } finally {
+      adoptionSaveInFlight.current = false;
       setIsSavingAdoptions(false);
     }
   };
 
+  const handleAdoptFuturePlanDays = () => {
+    if (adoptionSaveInFlight.current || isLoading) return;
+    const nextSelected: Record<string, Set<number>> = {};
+    for (const child of childrenData) {
+      if (!child.id) continue;
+      nextSelected[child.id] = new Set(daysArray.filter(day => {
+        const cell = getCellDetails(child.id!, day);
+        return cell.isAttending && cell.hasFuture;
+      }));
+    }
+    setIsMonthlyTasksOpen(false);
+    void handleSaveAdoptions(nextSelected);
+  };
+
+  const toggleDaySelection = (childId: string, day: number) => {
+    if (adoptionSaveInFlight.current || isLoading) return;
+    const days = new Set(selectedDaysMap[childId] || []);
+    if (days.has(day)) days.delete(day); else days.add(day);
+    void handleSaveAdoptions({ ...selectedDaysMap, [childId]: days });
+  };
+
   const handleSaveSettings = async () => {
+    if (implementationSettingsKey !== `${selectedOfficeId}_${currentMonth}` || isImplementationSettingsLoading) return;
+    const { implementationYear: y, implementationMonth: m, implementationDay: d } = implementationDraft;
+    if (y || m || d) {
+      const date = new Date(Number(y) + 2018, Number(m) - 1, Number(d));
+      if (!y || !m || !d || ![y,m,d].every(value => /^\d+$/.test(value)) || Number(y) < 1 || date.getFullYear() !== Number(y) + 2018 || date.getMonth() !== Number(m) - 1 || date.getDate() !== Number(d)) {
+        setSettingsTab('implementation');
+        setImplementationTab('author');
+        setImplementationSettingsError('作成日は有効な年月日をすべて入力するか、すべて空欄にしてください。');
+        return;
+      }
+    }
+    setImplementationSettingsError('');
     setIsSavingSettings(true);
     try {
-      await setDoc(doc(db, 'officeSummarySettings', selectedOfficeId), {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'officeSummarySettings', selectedOfficeId), {
         holidayDaysOfWeek: tempSettings.holidayDaysOfWeek,
         individualDaysOfWeek: tempSettings.individualDaysOfWeek,
         holidayColor: tempSettings.holidayColor,
         individualColor: tempSettings.individualColor,
+        hiddenCountRows: tempSettings.hiddenCountRows,
+        focusHighlightEnabled: tempSettings.focusHighlightEnabled,
+        staffDisplayMode: tempSettings.staffDisplayMode,
+        tableOrientation: tempSettings.tableOrientation,
         updatedAt: serverTimestamp()
       }, { merge: true });
 
+      batch.set(monthlySettingsRef(selectedOfficeId, currentMonth), {
+        ...inheritedMonthlySettings, ...implementationDraft, officeId: selectedOfficeId, month: currentMonth, updatedAt: serverTimestamp()
+      }, { merge: true });
+      auditDocumentWrite(batch,{officeId:selectedOfficeId,book:'implementation',childId:'',month:currentMonth,label:'事業所共通の作成者・作成日',operation:'設定変更'},inheritedMonthlySettings,implementationDraft);
+      await batch.commit();
       setSummarySettings({ ...tempSettings });
       setIsSettingsOpen(false);
     } catch (err) {
@@ -1722,10 +1559,20 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
     }
   };
 
+  if (monthlyReadError) return <div role="alert" className="mx-auto mt-8 max-w-xl space-y-4 rounded-2xl border border-rose-200 bg-rose-50 p-6 text-rose-900">
+    <h2 className="font-bold">実施状況を読み込めませんでした</h2><p className="text-sm leading-relaxed">{monthlyReadError}</p>
+    <button type="button" disabled={isLoading} onClick={() => void fetchData()} className="rounded-lg border border-rose-300 bg-white px-4 py-2 text-sm disabled:opacity-50">再試行</button>
+  </div>;
+
   return (
     <div className="flex flex-col h-full gap-3">
+      {mobileHeaderSlot&&createPortal(<div className="flex min-h-11 items-center gap-2 pb-2">
+        <button type="button" aria-label="児童一覧に戻る" onClick={()=>navigate('/')} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"><ArrowLeft size={20}/></button>
+        <h2 className="min-w-0 flex-1 text-sm font-bold text-slate-800">月間支援実施状況一覧</h2>
+        <button type="button" aria-label="実施状況の設定" title="実施状況の設定" onClick={()=>{setSettingsTab('table');setImplementationTab('author');setIsSettingsOpen(true);}} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50"><SettingsIcon size={20}/></button>
+      </div>,mobileHeaderSlot)}
       {/* 上部ヘッダー */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-white px-5 py-3 rounded-2xl border border-slate-200/80 shadow-sm shrink-0">
+      <div className="summary-desktop-header flex flex-col md:flex-row md:items-center justify-between gap-3 bg-white px-5 py-3 rounded-2xl border border-slate-200/80 shadow-sm shrink-0">
         <div className="flex items-center gap-3">
           <button 
             onClick={() => navigate('/')}
@@ -1734,10 +1581,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
             <ArrowLeft size={20} />
           </button>
           <div>
-            <span className="px-2.5 py-0.5 bg-primary/10 text-primary text-xs font-semibold rounded-full tracking-wider">
-              {officeName}
-            </span>
-            <h2 className="text-lg md:text-xl font-bold text-slate-800 mt-0.5 flex items-center gap-2">
+<h2 className="text-lg md:text-xl font-bold text-slate-800 mt-0.5 flex items-center gap-2">
               <Calendar size={20} className="text-primary" />
               月間支援実施状況一覧
             </h2>
@@ -1746,91 +1590,45 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
         {/* 月切替コントロールとアクション */}
         <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            onClick={handleCopyAllTreeCommunications}
-            className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-250 rounded-xl text-slate-700 text-xs font-bold transition-all shadow-2xs"
-            title="ツリー通信を全員分コピーします(児童名除外。未変換のみ/全コピーの選択可)"
-          >
-            <Copy size={14} className="text-slate-500" />
-            <span>ツリー通信を一括コピー</span>
+          <div className="relative" onKeyDown={event => {
+            if (event.key === 'Escape' && isMonthlyTasksOpen) {
+              event.preventDefault(); setIsMonthlyTasksOpen(false);
+              document.getElementById('monthly-tasks-trigger')?.focus();
+            }
+          }} onBlur={event => {
+            if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) setIsMonthlyTasksOpen(false);
+          }}>
+            <button id="monthly-tasks-trigger" type="button" aria-expanded={isMonthlyTasksOpen} aria-controls="monthly-tasks-panel"
+              disabled={isLoading || isSavingAdoptions || childrenData.length === 0}
+              onClick={() => { setIsMonthlyTasksOpen(prev => !prev); setIsLegendOpen(false); }}
+              className="relative z-50 flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+              <Calendar size={17} className="text-primary" />月次作業<ChevronDown size={15} className={isMonthlyTasksOpen ? 'rotate-180' : ''} />
+            </button>
+            {isMonthlyTasksOpen && <>
+              <div className="fixed inset-0 z-40" aria-hidden="true" onClick={() => setIsMonthlyTasksOpen(false)} />
+              <section id="monthly-tasks-panel" aria-label="月次作業" className="absolute left-0 top-full z-50 mt-2 w-80 max-w-[calc(100vw-2rem)] max-h-[70dvh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-xl sm:left-auto sm:right-0">
+                <div className="px-3 pb-2 pt-2 text-xs font-semibold text-slate-400">月初</div>
+                <div className="flex items-center rounded-xl">
+                <button type="button" onClick={() => { setIsMonthlyTasksOpen(false); setIsAutoSelectOpen(true); }} className="group/task flex min-w-0 flex-1 items-start gap-3 rounded-xl px-3 py-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:bg-slate-50"><Wand2 size={17} className="mt-0.5 shrink-0 text-primary" /><MonthlyTaskLabel title="採用日を自動選択" description="必要日数・日付の間隔・除外する週などを指定して、採用日をまとめて選びます。" /></button>
+                  <div className="shrink-0 pr-2"><button type="button" onClick={() => { setIsMonthlyTasksOpen(false); void handleSaveAdoptions({}); }} aria-label="採用日を全解除" title="採用日を全解除" className="inline-flex min-h-10 items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-rose-500 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"><RotateCcw size={12} />全解除</button></div>
+                </div>
+                <div className="flex items-center rounded-xl">
+                <button type="button" onClick={() => { setIsMonthlyTasksOpen(false); setIsDistributeModalOpen(true); }} className="group/task flex min-w-0 flex-1 items-start gap-3 rounded-xl px-3 py-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:bg-slate-50"><Users size={17} className="mt-0.5 shrink-0 text-primary" /><MonthlyTaskLabel title="担当者を割り振り" description="記入数の偏りを抑えるように、児童の担当スタッフを割り振ります。" /></button>
+                  <div className="shrink-0 pr-2"><button type="button" disabled={isSavingStaffAssignments || staffAssignmentLoadedScope !== `${selectedOfficeId}_${currentMonth}`} onClick={() => { setIsMonthlyTasksOpen(false); setStaffActionError(''); setIsClearStaffOpen(true); }} aria-label="スタッフの担当を全解除" title="スタッフの担当を全解除" className="inline-flex min-h-10 items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-rose-500 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"><RotateCcw size={12} />全解除</button></div>
+                </div>
+                <div className="mt-2 border-t border-slate-100 px-3 pb-2 pt-3 text-xs font-semibold text-slate-400">月末</div>
+                <button type="button" onClick={handleAdoptFuturePlanDays} disabled={isLoading || isSavingAdoptions} className="group/task flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:bg-slate-50 disabled:opacity-50"><Check size={17} className="mt-0.5 shrink-0 text-primary" /><MonthlyTaskLabel title="◎の日だけ採用にする" description="今後の予定が入力されている日だけを、採用日にします。" /></button>
+                <button type="button" onClick={() => { setIsMonthlyTasksOpen(false); setIsResultImportOpen(true); }} className="group/task flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:bg-slate-50"><Sparkles size={17} className="mt-0.5 shrink-0 text-primary" /><MonthlyTaskLabel title="療育結果を作成・一括登録" description="プロンプト・ツリー通信のコピーから、結果の貼り付け・確認・登録までをこの画面で行います。" /></button>
+                <button type="button" onClick={()=>{setIsMonthlyTasksOpen(false);setSettingsTab('implementation');setImplementationTab('author');setIsSettingsOpen(true);}} className="group/task flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:bg-slate-50"><SettingsIcon size={17} className="mt-0.5 shrink-0 text-primary"/><MonthlyTaskLabel title="作成者・作成日の設定" description="今月の専門的支援実施計画に使う作成者名と作成日を確認・設定します。"/></button>
+              </section>
+            </>}
+          </div>
+          <button type="button" disabled={isLoading || staffAssignmentLoadedScope !== `${selectedOfficeId}_${currentMonth}`} onClick={() => setIsStaffSummaryOpen(true)} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Users size={17} />スタッフ別の記入数</button>
+          <button type="button" aria-label="変更ログ" title="変更ログ" onClick={()=>setIsDocumentLogOpen(true)} className="flex min-h-10 min-w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"><Clock size={20}/></button>
+          <button type="button" disabled={isLoading || childrenData.length === 0} onClick={()=>{const table=document.getElementById('monthly-summary-table');if(table instanceof HTMLTableElement)setPrintSource(table.cloneNode(true) as HTMLTableElement);}} className="flex items-center justify-center rounded-xl border border-slate-200 bg-white p-2 text-slate-700 hover:bg-slate-100 disabled:opacity-50" aria-label="表を印刷" title="印刷設定を開きます">
+            <Printer size={20} />
           </button>
-          <button
-            onClick={() => setIsResultImportOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 border border-slate-250 rounded-xl text-slate-700 text-xs font-bold transition-all shadow-2xs"
-            title="Geminiで変換した全員分の結果を一括で登録します"
-          >
-            <Sparkles size={14} className="text-primary" />
-            <span>結果を一括登録</span>
-          </button>
-
-          <button
-            onClick={() => setIsSelectionMode(prev => !prev)}
-            className={`flex items-center gap-1.5 px-3 py-2 border rounded-xl text-xs font-bold transition-all shadow-2xs ${
-              isSelectionMode
-                ? 'bg-amber-500 hover:bg-amber-600 text-white border-amber-600 shadow-amber-200 ring-2 ring-amber-300'
-                : 'bg-white hover:bg-amber-50/60 border-slate-250 text-slate-700 hover:border-amber-300'
-            }`}
-            title="マスを選択して専門的支援の正式採用・アーカイブを設定するモードを切り替えます"
-          >
-            <BookmarkCheck size={14} className={isSelectionMode ? 'text-white' : 'text-amber-500'} />
-            <span>{isSelectionMode ? '選択モード終了' : '採用日を選択'}</span>
-          </button>
-
-          {/* 必要日数を分配ボタン */}
-          <button
-            onClick={() => setIsDistributeModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs hover:shadow active:scale-95"
-            title="必要日数をスタッフに均等に分配します（児童単位・不可分ルール）"
-          >
-            <Users size={14} />
-            <span>必要日数を分配</span>
-          </button>
-
           <div className="flex items-center gap-2 border-l border-slate-200 pl-2.5">
-            <button
-              onClick={handlePrevMonth}
-              className="p-2 hover:bg-slate-100 border border-slate-200 rounded-xl text-slate-600 transition-all hover:border-slate-300"
-              title="前月"
-            >
-              <ChevronLeft size={20} />
-            </button>
-            <div className="relative">
-              <input
-                type="month"
-                value={currentMonth}
-                onChange={(e) => setCurrentMonth(e.target.value)}
-                className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/10 transition-all cursor-pointer"
-              />
-            </div>
-            <button
-              onClick={handleNextMonth}
-              className="p-2 hover:bg-slate-100 border border-slate-200 rounded-xl text-slate-600 transition-all hover:border-slate-300"
-              title="次月"
-            >
-              <ChevronRight size={20} />
-            </button>
-
-            {/* フォーカスハイライトON/OFFトグル */}
-            <button
-              onClick={() => setIsFocusHighlightEnabled(prev => !prev)}
-              className={`p-2 border rounded-xl transition-all flex items-center justify-center ${
-                isFocusHighlightEnabled
-                  ? 'bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100 shadow-2xs'
-                  : 'bg-slate-50 text-slate-400 border-slate-200 hover:bg-slate-100'
-              }`}
-              title={isFocusHighlightEnabled ? "フォーカス表示: ON (クリックでOFF)" : "フォーカス表示: OFF (クリックでON)"}
-            >
-              <Crosshair size={18} />
-            </button>
-
-            <button
-              onClick={() => setIsSettingsOpen(true)}
-              className="p-2 hover:bg-slate-100 border border-slate-200 rounded-xl text-slate-600 transition-all hover:border-slate-300 flex items-center justify-center"
-              title="カレンダー表示設定"
-            >
-              <SettingsIcon size={20} />
-            </button>
-
             {/* 凡例「？」アイコンボタン & ポップオーバー */}
             <div className="relative">
               <button
@@ -1866,43 +1664,18 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                     </div>
                     <div className="space-y-2">
                       <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 flex items-center justify-center rounded bg-green-50 text-green-600 font-bold border border-green-200 shrink-0">◎</span>
-                        <span>療育結果・今後の予定 ともに記入あり</span>
+                        <span className="w-6 h-6 flex items-center justify-center ring-2 ring-inset ring-emerald-600 shrink-0" />
+                        <span>緑枠：個別の採用日（今後の予定を入れる日）</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 flex items-center justify-center rounded bg-amber-50 text-amber-500 font-bold border border-amber-200 shrink-0">△</span>
-                        <span>療育結果のみ記入あり（予定未記入）</span>
+                        <span className="w-6 h-6 flex items-center justify-center shrink-0">〇</span>
+                        <span>出席予定あり（今後の予定は未記入）</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 flex items-center justify-center rounded bg-blue-50 text-blue-600 font-bold border border-blue-200 shrink-0">◯</span>
-                        <span>今後の予定のみ記入あり（結果未記入）</span>
+                        <span className="w-6 h-6 flex items-center justify-center text-green-600 font-bold shrink-0">◎</span>
+                        <span>今後の予定あり</span>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 flex items-center justify-center rounded bg-red-100 text-red-600 font-bold border border-red-200 shrink-0">✉️</span>
-                        <span>ツリー通信のみあり（どちらも未記入）</span>
-                      </div>
-                      <div className="flex items-center gap-2 font-semibold text-primary pt-1.5 border-t border-slate-100">
-                        <span className="w-6 h-6 flex items-center justify-center rounded-xs ring-2 ring-inset ring-primary bg-primary/10 text-primary text-xs font-bold shrink-0">
-                          枠
-                        </span>
-                        <span>太枠: 出席予定（{officeName}）</span>
-                      </div>
-                      <div className="flex items-center gap-2 font-semibold text-emerald-700 pt-1.5 border-t border-slate-100">
-                        <span className="w-6 h-6 flex items-center justify-center rounded-xs ring-2 ring-inset ring-emerald-600 bg-emerald-100 text-emerald-800 text-xs font-bold shrink-0">
-                          ✓
-                        </span>
-                        <span>正式採用（緑枠・チェック付き）</span>
-                      </div>
-                      <div className="flex items-center gap-2 text-rose-600 font-bold">
-                        <span className="w-6 h-6 flex items-center justify-center rounded bg-rose-50 text-rose-500 font-bold border border-rose-200 shrink-0">✕</span>
-                        <span>欠席（他アプリ等で欠席登録された日）</span>
-                      </div>
-                      <div className="flex items-center gap-2 text-slate-400">
-                        <span className="w-6 h-6 flex items-center justify-center rounded bg-slate-100 opacity-40 shrink-0 text-slate-500 font-bold">
-                          ◎
-                        </span>
-                        <span>アーカイブ（薄色表示・除外）</span>
-                      </div>
+                      <p className="text-slate-500">緑枠は採用日です。記号は出席予定・今後の予定の有無を表します。</p>
                       <div className="flex items-center gap-2 pt-1.5 border-t border-slate-100">
                         <span 
                           className="w-5 h-5 rounded border border-slate-300 shrink-0" 
@@ -1929,110 +1702,78 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
               )}
             </div>
           </div>
+            <div className="ml-auto flex shrink-0 items-center gap-2.5">
+            <button
+              onClick={() => { setSettingsTab('table'); setImplementationTab('author'); setIsSettingsOpen(true); }}
+              aria-label="実施状況の設定"
+              className="shrink-0 p-2 hover:bg-slate-100 border border-slate-200 rounded-xl text-slate-600 transition-all hover:border-slate-300 flex items-center justify-center"
+              title="実施状況の設定"
+            >
+              <SettingsIcon size={20} />
+            </button>
+              <HeaderAccountActions />
+            </div>
+
         </div>
       </div>
 
-      {/* 採用日選択モード時の操作バー */}
-      {isSelectionMode && (
-        <div className="bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-emerald-500/10 border border-amber-300/80 px-5 py-3 rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-xs animate-in fade-in slide-in-from-top-2 duration-200 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-amber-500 text-white flex items-center justify-center shadow-xs shrink-0">
-              <BookmarkCheck size={20} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-bold text-amber-950">採用日選択モード</span>
-                <span className="px-2 py-0.5 bg-amber-200/80 text-amber-900 text-[10px] font-extrabold rounded-full">編集中</span>
-              </div>
-              <p className="text-xs text-amber-850 mt-0.5">
-                マスをクリックして正式採用日を選択します。「自動選択」では個別療育の出席日をすべて最優先で採用（最大6日、上限超過時は個別以外を除外）します。
-              </p>
-            </div>
-          </div>
+      {adoptionSaveError && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2 text-xs text-rose-700">{adoptionSaveError}</p>}
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => handleAutoSelect()}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-amber-50 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold shadow-2xs transition-all active:scale-95"
-              title="個別療育日をすべて採用し、残りを必要日数（最大6日）まで自動選択します"
-            >
-              <Wand2 size={14} className="text-amber-600" />
-              <span>必要日数で自動選択</span>
-            </button>
-
-            <button
-              onClick={() => setSelectedDaysMap({})}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 rounded-xl text-xs font-bold shadow-2xs transition-all active:scale-95"
-              title="すべての児童の選択をクリアします"
-            >
-              <RotateCcw size={13} />
-              <span>全解除</span>
-            </button>
-
-            <button
-              onClick={handleSaveAdoptions}
-              disabled={isSavingAdoptions}
-              className="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all hover:shadow active:scale-95 disabled:opacity-50"
-            >
-              {isSavingAdoptions ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : (
-                <Save size={14} />
-              )}
-              <span>選択内容を確定して保存</span>
-            </button>
-
-            <button
-              onClick={() => setIsSelectionMode(false)}
-              className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-amber-100/50 transition-colors ml-1"
-              title="選択モードを終了"
-            >
-              <X size={18} />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* メインの表テーブル（画面いっぱいに表示） */}
+      {/* 列幅を保ち、収まらない場合は表の中で横スクロール */}
       <div className="flex-1 min-h-0 bg-white border border-slate-200/80 rounded-2xl shadow-sm overflow-hidden flex flex-col">
-        {isLoading ? (
+        {staffAssignmentLoadError&&<p role="alert" className="px-3 py-2 text-xs text-rose-600">{staffAssignmentLoadError}<button type="button" onClick={()=>setStaffAssignmentReload(value=>value+1)} className="ml-3 min-h-10 rounded-xl border px-3">担当を再読み込み</button></p>}
+        {isLoading||(staffFilter!=='all'&&!staffFilterReady&&!staffAssignmentLoadError) ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3">
             <Loader2 className="w-8 h-8 text-primary animate-spin" />
             <p className="text-sm text-slate-400">データを読み込み中...</p>
           </div>
-        ) : childrenData.length === 0 ? (
+        ) : sortedChildren.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-2 p-8">
             <AlertTriangle className="w-8 h-8 text-amber-500" />
             <p className="text-sm font-semibold text-slate-600">表示対象の児童がいません</p>
-            <p className="text-xs text-slate-400">事業所の所属児童、または検索条件をご確認ください。</p>
+            <DropdownSelect label="児童の並べ替え・表示" value={childOrder} onChange={setChildOrder} options={SUMMARY_ORDER_OPTIONS} toggles={assignedOnlyToggles} icon={<ArrowDownUp size={18}/>}/>
+            <p className="text-xs text-slate-400">{staffFilter==='mine'&&!ownStaffId?'ログイン中のスタッフに一致する担当者が見つかりません。':'事業所の所属児童、または担当の表示条件をご確認ください。'}</p>
           </div>
         ) : (
-          <div className="flex-1 overflow-auto bg-white">
-            <table 
-              className="w-full border-separate border-spacing-0 table-fixed min-w-[800px]"
+          <div className="flex-1 min-w-0 overflow-auto bg-white">
+            <SummaryTableLayout orientation={summarySettings.tableOrientation}>
+            <table id="monthly-summary-table"
+              className="border-separate border-spacing-0 table-fixed"
+              style={{ width: 80 + sortedChildren.length * 40 }}
               onMouseLeave={() => {
                 setHoveredColChildId(null);
                 setHoveredRowDay(null);
-                setHoveredCellPreview(null);
               }}
             >
+              <colgroup>
+                <col style={{ width: 80 }} />
+                {sortedChildren.map(child => <col key={child.id} style={{ width: 40 }} />)}
+              </colgroup>
               <thead>
                 {/* 1行目: 児童氏名 */}
                 <tr>
                   <th 
-                    className="w-20 px-2 py-2 text-center align-middle text-xs font-bold text-slate-600 tracking-wider border-r border-b border-slate-200 sticky top-0 left-0 z-30 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.06)]"
-                    style={{ height: '110px', backgroundColor: '#f1f5f9' }}
+                    className="px-2 py-2 text-center align-middle text-xs font-bold text-slate-600 tracking-wider border-r border-b border-slate-200 sticky top-0 left-0 z-30 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.06)]"
+                    style={{ height: '116px', backgroundColor: '#f1f5f9' }}
                   >
-                    児童氏名
+                    <div className={summarySettings.tableOrientation==='children-rows'?'flex items-center justify-center gap-0.5':'flex flex-col items-center justify-center gap-1'}>
+                      <MonthPicker value={currentMonth} onChange={setCurrentMonth}/>
+                      <span data-print-exclude>
+                        <DropdownSelect label="児童氏名の並べ替え" icon={<ArrowDownUp size={18}/>} iconOnly value={childOrder} onChange={setChildOrder} options={SUMMARY_ORDER_OPTIONS} toggles={assignedOnlyToggles}/>
+                      </span>
+                    </div>
                   </th>
-                  {childrenData.map(child => {
+                  {sortedChildren.map((child, columnIndex) => {
                     const isColHovered = isFocusHighlightEnabled && child.id === hoveredColChildId;
                     return (
-                      <th 
+                      <th
+                        data-even-column={columnIndex % 2 === 1}
                         key={child.id}
+                        data-print-child-id={child.id}
                         className={`px-2 py-2 border-r border-b border-slate-200 text-center align-middle sticky top-0 z-20 transition-colors duration-150 ${
                           isColHovered ? '!bg-blue-100/90 shadow-md ring-2 ring-inset ring-blue-400' : ''
                         }`}
+                        data-print-background="#ffffff"
                         style={{ height: '110px', backgroundColor: isColHovered ? '#dbeafe' : '#ffffff' }}
                         title={child.fullName}
                         onMouseEnter={() => isFocusHighlightEnabled && setHoveredColChildId(child.id || null)}
@@ -2049,7 +1790,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                             margin: '0 auto'
                           }}
                         >
-                          {child.fullName}
+                          <ChildDocumentMenu childId={child.id!} name={child.fullName} month={currentMonth} />
                         </div>
                       </th>
                     );
@@ -2064,19 +1805,21 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                   >
                     担当スタッフ
                   </th>
-                  {childrenData.map(child => {
-                    if (!child.id) return <th key={Math.random()} className="border-r border-b border-slate-200" />;
+                  {sortedChildren.map((child, columnIndex) => {
+                    if (!child.id) return <th data-even-column={columnIndex % 2 === 1} key={Math.random()} className="border-r border-b border-slate-200" />;
                     const staffId = assignedStaffMap[child.id];
                     const assignedStaff = staffList.find(s => s.id === staffId);
                     const isColHovered = isFocusHighlightEnabled && child.id === hoveredColChildId;
                     const isEditing = staffPopoverAnchor?.childId === child.id;
 
                     return (
-                      <th 
+                      <th
+                        data-even-column={columnIndex % 2 === 1}
                         key={`staff-${child.id}`}
                         className={`px-1 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky top-[110px] z-20 text-xs font-bold select-none transition-colors duration-150 relative ${
                           isColHovered ? '!bg-indigo-50 text-indigo-900 border-x-blue-300' : 'text-slate-800'
                         }`}
+                        data-print-background="#f8fafc"
                         style={{ height: '34px', backgroundColor: isColHovered ? '#e0e7ff' : '#f8fafc' }}
                         onMouseEnter={() => isFocusHighlightEnabled && setHoveredColChildId(child.id || null)}
                         onMouseLeave={() => isFocusHighlightEnabled && setHoveredColChildId(null)}
@@ -2099,23 +1842,14 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                           className={`w-full flex items-center justify-center gap-1 py-1 px-1 rounded-md transition-colors ${
                             isEditing ? 'bg-indigo-100 ring-2 ring-indigo-500' : 'hover:bg-slate-200/60'
                           }`}
+                          aria-label={assignedStaff ? `担当スタッフ：${assignedStaff.name}を変更` : '担当スタッフを設定'}
                           title={assignedStaff ? `担当スタッフ: ${assignedStaff.name} (クリックして変更)` : '担当スタッフ未設定 (クリックして設定)'}
                         >
-                          {assignedStaff ? (
-                            <>
-                              <span 
-                                className="w-2.5 h-2.5 rounded-full inline-block shrink-0 shadow-2xs" 
-                                style={{ backgroundColor: assignedStaff.color }}
-                              />
-                              <span className="truncate max-w-[48px] text-[10px] font-bold text-slate-800">
-                                {assignedStaff.name.split(' ')[0]}
-                              </span>
-                            </>
-                          ) : (
-                            <span className="text-[10px] text-slate-400 font-normal hover:text-indigo-600 flex items-center gap-0.5">
-                              <span className="text-slate-300">●</span>
-                              <span>未設定</span>
-                            </span>
+                          {summarySettings.staffDisplayMode !== 'name' && (
+                            <span data-staff-icon aria-hidden="true" className="h-4 w-4 shrink-0 rounded-full shadow-2xs" style={{ display: 'inline-block', backgroundColor: assignedStaff?.color || '#cbd5e1' }} />
+                          )}
+                          {summarySettings.staffDisplayMode !== 'icon' && (
+                            <span className="min-w-0 truncate text-[10px] font-bold text-slate-800">{assignedStaff?.name.split(/[\s　]+/)[0] || '未設定'}</span>
                           )}
                         </button>
                       </th>
@@ -2124,24 +1858,26 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                 </tr>
 
                 {/* 3行目: 出席日数 */}
-                <tr>
+                {!hiddenCountRows.includes('出席日数') && <tr>
                   <th 
-                    className="w-20 px-2 py-1 text-center align-middle text-[11px] font-bold text-slate-700 tracking-wider border-r border-b border-slate-200 sticky top-[144px] left-0 z-30 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.06)]"
-                    style={{ height: '28px', backgroundColor: '#f1f5f9' }}
+                    className="w-20 px-2 py-1 text-center align-middle text-[11px] font-bold text-slate-700 tracking-wider border-r border-b border-slate-200 sticky left-0 z-30 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.06)]"
+                    style={{ top: countRowTop(0), height: '28px', backgroundColor: '#f1f5f9' }}
                   >
                     出席日数
                   </th>
-                  {childrenData.map(child => {
+                  {sortedChildren.map((child, columnIndex) => {
                     const stat = child.id ? childAttendanceStats[child.id] : null;
                     const attCount = stat?.attendanceCount ?? 0;
                     const isColHovered = isFocusHighlightEnabled && child.id === hoveredColChildId;
                     return (
-                      <th 
+                      <th
+                        data-even-column={columnIndex % 2 === 1}
                         key={`att-${child.id}`}
-                        className={`px-2 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky top-[144px] z-20 text-xs font-bold select-none transition-colors duration-150 ${
+                        className={`px-2 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky z-20 text-xs font-bold select-none transition-colors duration-150 ${
                           isColHovered ? '!bg-blue-50 text-blue-900 border-x-blue-300' : 'text-slate-800'
                         }`}
-                        style={{ height: '28px', backgroundColor: isColHovered ? '#eff6ff' : '#ffffff' }}
+                        data-print-background="#ffffff"
+                        style={{ top: countRowTop(0), height: '28px', backgroundColor: isColHovered ? '#eff6ff' : '#ffffff' }}
                         title={`${child.fullName} の${monthNum}月の出席日数: ${attCount}日`}
                         onMouseEnter={() => isFocusHighlightEnabled && setHoveredColChildId(child.id || null)}
                         onMouseLeave={() => isFocusHighlightEnabled && setHoveredColChildId(null)}
@@ -2150,29 +1886,31 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                       </th>
                     );
                   })}
-                </tr>
+                </tr>}
 
                 {/* 4行目: 必要日数 */}
-                <tr>
+                {!hiddenCountRows.includes('必要日数') && <tr>
                   <th 
-                    className="w-20 px-2 py-1 text-center align-middle text-[11px] font-bold text-blue-900 tracking-wider border-r border-b border-slate-200 sticky top-[172px] left-0 z-30 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.06)]"
-                    style={{ height: '28px', backgroundColor: '#dbeafe' }}
+                    className="w-20 px-2 py-1 text-center align-middle text-[11px] font-bold text-blue-900 tracking-wider border-r border-b border-slate-200 sticky left-0 z-30 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.06)]"
+                    style={{ top: countRowTop(1), height: '28px', backgroundColor: '#dbeafe' }}
                   >
                     必要日数
                   </th>
-                  {childrenData.map(child => {
+                  {sortedChildren.map((child, columnIndex) => {
                     const stat = child.id ? childAttendanceStats[child.id] : null;
                     const reqDays = stat?.requiredDays ?? 0;
                     const isHoukago = stat?.isHoukago ?? true;
                     const attCount = stat?.attendanceCount ?? 0;
                     const isColHovered = isFocusHighlightEnabled && child.id === hoveredColChildId;
                     return (
-                      <th 
+                      <th
+                        data-even-column={columnIndex % 2 === 1}
                         key={`req-${child.id}`}
-                        className={`px-2 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky top-[172px] z-20 text-xs font-bold select-none transition-colors duration-150 ${
+                        className={`px-2 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky z-20 text-xs font-bold select-none transition-colors duration-150 ${
                           isColHovered ? '!bg-blue-200/80 text-blue-950 font-black' : 'text-blue-700'
                         }`}
-                        style={{ height: '28px', backgroundColor: isColHovered ? '#bfdbfe' : '#eff6ff' }}
+                        data-print-background="#eff6ff"
+                        style={{ top: countRowTop(1), height: '28px', backgroundColor: isColHovered ? '#bfdbfe' : '#eff6ff' }}
                         title={`${child.fullName} (${isHoukago ? '放課後等デイサービス' : '児童発達支援'} / 出席${attCount}日) の必要記録日数: ${reqDays}日分${stat && stat.individualCount > stat.baseRequiredDays ? ` (個別療育出席${stat.individualCount}日を優先)` : ''}`}
                         onMouseEnter={() => isFocusHighlightEnabled && setHoveredColChildId(child.id || null)}
                         onMouseLeave={() => isFocusHighlightEnabled && setHoveredColChildId(null)}
@@ -2181,29 +1919,31 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                       </th>
                     );
                   })}
-                </tr>
+                </tr>}
 
                 {/* 5行目: 個別以外 */}
-                <tr>
+                {!hiddenCountRows.includes('個別以外') && <tr>
                   <th 
-                    className="w-20 px-2 py-1 text-center align-middle text-[11px] font-bold text-emerald-900 tracking-wider border-r border-b border-slate-200 sticky top-[200px] left-0 z-30 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.06)]"
-                    style={{ height: '28px', backgroundColor: '#d1fae5' }}
+                    className="w-20 px-2 py-1 text-center align-middle text-[11px] font-bold text-emerald-900 tracking-wider border-r border-b border-slate-200 sticky left-0 z-30 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.06)]"
+                    style={{ top: countRowTop(2), height: '28px', backgroundColor: '#d1fae5' }}
                   >
                     個別以外
                   </th>
-                  {childrenData.map(child => {
+                  {sortedChildren.map((child, columnIndex) => {
                     const stat = child.id ? childAttendanceStats[child.id] : null;
                     const nonIndCount = stat?.nonIndividualCount ?? 0;
                     const indCount = stat?.individualCount ?? 0;
                     const reqDays = stat?.requiredDays ?? 0;
                     const isColHovered = isFocusHighlightEnabled && child.id === hoveredColChildId;
                     return (
-                      <th 
+                      <th
+                        data-even-column={columnIndex % 2 === 1}
                         key={`non-ind-${child.id}`}
-                        className={`px-2 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky top-[200px] z-20 text-xs font-bold select-none transition-colors duration-150 ${
+                        className={`px-2 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky z-20 text-xs font-bold select-none transition-colors duration-150 ${
                           isColHovered ? '!bg-emerald-100/90 text-emerald-950 font-black' : 'text-emerald-800'
                         }`}
-                        style={{ height: '28px', backgroundColor: isColHovered ? '#d1fae5' : '#ecfdf5' }}
+                        data-print-background="#ecfdf5"
+                        style={{ top: countRowTop(2), height: '28px', backgroundColor: isColHovered ? '#d1fae5' : '#ecfdf5' }}
                         title={`${child.fullName} の個別療育以外の必要日数: ${nonIndCount}日分 (必要日数: ${reqDays}日 − 個別出席: ${indCount}日)`}
                         onMouseEnter={() => isFocusHighlightEnabled && setHoveredColChildId(child.id || null)}
                         onMouseLeave={() => isFocusHighlightEnabled && setHoveredColChildId(null)}
@@ -2212,19 +1952,19 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                       </th>
                     );
                   })}
-                </tr>
+                </tr>}
 
                 {/* 6行目: 採用選択 */}
                 <tr>
                   <th 
-                    className="w-20 px-2 py-1 text-center align-middle text-[11px] font-bold text-amber-900 tracking-wider border-r border-b border-slate-200 sticky top-[228px] left-0 z-30 shadow-[2px_2px_4px_-1px_rgba(0,0,0,0.06)]"
-                    style={{ height: '30px', backgroundColor: '#fef3c7' }}
+                    className="w-20 px-2 py-1 text-center align-middle text-[11px] font-bold text-amber-900 tracking-wider border-r border-b border-slate-200 sticky left-0 z-30 shadow-[2px_2px_4px_-1px_rgba(0,0,0,0.06)]"
+                    style={{ top: countRowTop(3), height: '30px', backgroundColor: '#fef3c7' }}
                   >
                     <div className="flex items-center justify-center gap-1">
                       <span>採用選択</span>
                     </div>
                   </th>
-                  {childrenData.map(child => {
+                  {sortedChildren.map((child, columnIndex) => {
                     const stat = child.id ? childAttendanceStats[child.id] : null;
                     const targetCount = Math.min(6, stat?.requiredDays ?? 0);
                     const selectedCount = (child.id && selectedDaysMap[child.id]) 
@@ -2239,12 +1979,14 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                     const isColHovered = isFocusHighlightEnabled && child.id === hoveredColChildId;
 
                     return (
-                      <th 
+                      <th
+                        data-even-column={columnIndex % 2 === 1}
                         key={`adp-count-${child.id}`}
-                        className={`px-1 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky top-[228px] z-20 text-xs font-bold select-none shadow-[0_2px_4px_-1px_rgba(0,0,0,0.06)] transition-colors duration-150 ${
+                        className={`px-1 py-0.5 border-r border-b border-slate-200 text-center align-middle sticky z-20 text-xs font-bold select-none shadow-[0_2px_4px_-1px_rgba(0,0,0,0.06)] transition-colors duration-150 ${
                           isColHovered ? '!bg-amber-100/90 ring-1 ring-amber-300' : ''
                         }`}
-                        style={{ height: '30px', backgroundColor: isColHovered ? '#fef3c7' : (isSelectionMode ? '#fffbeb' : '#ffffff') }}
+                        data-print-background="#ffffff"
+                        style={{ top: countRowTop(3), height: '30px', backgroundColor: isColHovered ? '#fef3c7' : '#ffffff' }}
                         title={`${child.fullName} の正式採用選択数: ${selectedCount}日 / 目標: ${targetCount}日 (最大6日)`}
                         onMouseEnter={() => isFocusHighlightEnabled && setHoveredColChildId(child.id || null)}
                         onMouseLeave={() => isFocusHighlightEnabled && setHoveredColChildId(null)}
@@ -2259,7 +2001,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                                   ? 'bg-blue-100 text-blue-800 border border-blue-200'
                                   : 'text-slate-400 font-normal'
                           }`}>
-                            {isMatch && '✓ '}
+                            
                             {selectedCount}/{targetCount}
                           </span>
                         </div>
@@ -2301,7 +2043,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                       </td>
                       
                       {/* 児童ごとのステータスセル */}
-                      {childrenData.map(child => {
+                      {sortedChildren.map((child, columnIndex) => {
                         if (!child.id) return <td key={Math.random()} className="p-0 border-r border-b border-slate-200 text-center relative z-0" />;
                         const cellInfo = getCellDetails(child.id, day);
                         // 出席予定日のみ採用選択可能（非出席・欠席日に採用マークが出るのを完全に防止）
@@ -2312,76 +2054,34 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                         return (
                           <td 
                             key={child.id}
+                            data-adopted={isSelected}
+                            data-even-column={columnIndex % 2 === 1}
                             className={`p-0 border-r border-b border-slate-200 text-center relative ${
                               isCellHovered ? 'z-20' : isColHovered ? 'z-10' : 'z-0'
                             } ${
-                              isSelectionMode && cellInfo.isAttending ? 'cursor-pointer select-none' : ''
+                              cellInfo.isAttending ? 'cursor-pointer select-none' : ''
                             }`}
-                            onClick={isSelectionMode && cellInfo.isAttending ? () => toggleDaySelection(child.id!, day) : undefined}
-                            onMouseEnter={(e) => handleCellMouseEnter(e, child, day)}
+                            title={cellInfo.isAttending ? 'クリックで採用日の設定・解除（自動保存）' : undefined}
+                            onMouseEnter={() => handleCellMouseEnter(child, day)}
                             onMouseLeave={handleCellMouseLeave}
                           >
                             {/* 列・行・セルのホバーハイライトオーバーレイ（フォーカスON時のみ表示） */}
                             {isFocusHighlightEnabled && isCellHovered ? (
-                              <div className="absolute inset-0 pointer-events-none bg-blue-500/[0.14] ring-2 ring-inset ring-blue-500 shadow-xs z-20" />
+                              <div data-print-exclude className="absolute inset-0 pointer-events-none bg-blue-500/[0.14] ring-2 ring-inset ring-blue-500 shadow-xs z-20" />
                             ) : isFocusHighlightEnabled && isColHovered ? (
-                              <div className="absolute inset-0 pointer-events-none bg-blue-500/[0.07] border-x border-blue-400/30 z-10" />
+                              <div data-print-exclude className="absolute inset-0 pointer-events-none bg-blue-500/[0.07] border-x border-blue-400/30 z-10" />
                             ) : isFocusHighlightEnabled && isRowHovered ? (
-                              <div className="absolute inset-0 pointer-events-none bg-blue-500/[0.04] z-10" />
+                              <div data-print-exclude className="absolute inset-0 pointer-events-none bg-blue-500/[0.04] z-10" />
                             ) : null}
 
-                            {isSelectionMode ? (
-                              <div
-                                className={`w-full h-10 flex items-center justify-center text-sm transition-all duration-150 relative ${cellInfo.className} ${
-                                  isSelected 
-                                    ? '!bg-emerald-100/90 ring-2 ring-inset ring-emerald-600 font-extrabold text-emerald-950 shadow-inner' 
-                                    : cellInfo.isReportArchived 
-                                      ? 'opacity-40 bg-slate-100 hover:opacity-75' 
-                                      : 'hover:bg-slate-100/70'
-                                }`}
+                              <button type="button"
+                                disabled={!cellInfo.isAttending || isSavingAdoptions || isLoading}
+                                aria-pressed={isSelected}
+                                aria-label={`${child.fullName} ${day}日 ${isSelected ? '採用日を解除' : '採用日にする'}`}
+                                onClick={() => toggleDaySelection(child.id!, day)}
+                                className={`w-full h-10 flex items-center justify-center text-sm transition-all duration-150 relative focus-visible:outline-2 focus-visible:outline-emerald-700 ${cellInfo.className} ${isSelected ? 'ring-2 ring-inset ring-emerald-600 bg-emerald-50/40 text-emerald-950 font-bold' : ''}`}
                                 style={!isSelected ? cellStyle : undefined}
-                              >
-                                {cellInfo.content}
-                                {isSelected && (
-                                  <span className="absolute top-0.5 right-0.5 w-3.5 h-3.5 bg-emerald-600 text-white rounded-full flex items-center justify-center text-[9px] font-bold shadow-xs">
-                                    ✓
-                                  </span>
-                                )}
-                              </div>
-                            ) : cellInfo.isAttending ? (
-                              <Link
-                                to={`/children/${child.id}/support-plan/${currentMonth}`}
-                                className={`w-full h-10 flex items-center justify-center text-sm transition-all duration-150 relative ${cellInfo.className} ${
-                                  cellInfo.isAdopted
-                                    ? 'ring-2 ring-inset ring-emerald-600 bg-emerald-50/40 text-emerald-950 font-bold'
-                                    : cellInfo.isReportArchived 
-                                      ? 'opacity-40 bg-slate-100' 
-                                      : ''
-                                }`}
-                                style={!cellInfo.isAdopted ? cellStyle : undefined}
-                              >
-                                {cellInfo.content}
-                                {cellInfo.isAdopted && (
-                                  <span 
-                                    className="absolute top-0.5 right-0.5 w-3 h-3 bg-emerald-600 text-white rounded-full flex items-center justify-center text-[8px] font-black shadow-2xs z-10" 
-                                    title="専門的支援に正式採用済み"
-                                  >
-                                    ✓
-                                  </span>
-                                )}
-                              </Link>
-                            ) : (
-                              <div
-                                className={`w-full h-10 flex items-center justify-center text-sm cursor-default select-none relative ${cellInfo.className} ${
-                                  cellInfo.isReportArchived 
-                                    ? 'opacity-40 bg-slate-100' 
-                                    : ''
-                                }`}
-                                style={cellStyle}
-                              >
-                                {cellInfo.content}
-                              </div>
-                            )}
+                              >{cellInfo.content}</button>
                           </td>
                         );
                       })}
@@ -2390,6 +2090,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                 })}
               </tbody>
             </table>
+            </SummaryTableLayout>
           </div>
         )}
       </div>
@@ -2465,138 +2166,136 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
         document.body
       )}
 
-      {/* ホバー時の専門的支援実施計画プレビュー（日数表の手前に最前面表示・createPortal・z-[9999]） */}
-      {hoveredCellPreview && createPortal(
-        <div 
-          className="fixed z-[9999] pointer-events-none transition-all duration-150 animate-in fade-in zoom-in-95 duration-100"
-          style={{
-            left: `${hoveredCellPreview.x}px`,
-            top: `${hoveredCellPreview.y}px`,
-            width: '660px',
-            maxWidth: 'calc(100vw - 32px)',
-          }}
-        >
-          <div className="bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-250 overflow-hidden text-xs text-slate-700 ring-1 ring-slate-900/10">
-            {/* ヘッダー情報 */}
-            <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200/80 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <span className="font-bold text-sm text-slate-800 tracking-wide">
-                  {hoveredCellPreview.childName}
-                </span>
-                <span className="px-2 py-0.5 rounded-full bg-slate-200/80 text-slate-700 text-[11px] font-bold">
-                  {hoveredCellPreview.dateStr} ({hoveredCellPreview.dayOfWeekStr})
-                </span>
-                {hoveredCellPreview.assignedStaffName && (
-                  <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200/80 text-indigo-900 text-[10px] font-bold flex items-center gap-1">
-                    {hoveredCellPreview.assignedStaffColor && (
-                      <span 
-                        className="w-2 h-2 rounded-full inline-block shrink-0 shadow-2xs" 
-                        style={{ backgroundColor: hoveredCellPreview.assignedStaffColor }}
-                      />
-                    )}
-                    <span>担当: {hoveredCellPreview.assignedStaffName}</span>
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {hoveredCellPreview.isAdopted ? (
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-[10px] font-bold flex items-center gap-1 shadow-2xs">
-                    ✓ 正式採用
-                  </span>
-                ) : hoveredCellPreview.isReportArchived ? (
-                  <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-300 text-[10px] font-bold shadow-2xs">
-                    アーカイブ
-                  </span>
-                ) : null}
-                {hoveredCellPreview.isAttending && (
-                  <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-semibold">
-                    {hoveredCellPreview.attInfoStr}
-                  </span>
-                )}
-              </div>
+      {isStaffSummaryOpen && (
+        <ViewportModal className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" onKeyDown={event => { if (event.key === 'Escape') setIsStaffSummaryOpen(false); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="staff-writing-title" className="flex max-h-[90dvh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+              <h3 id="staff-writing-title" className="font-bold text-slate-800">スタッフ別の記入数</h3>
+              <button autoFocus type="button" aria-label="記入数一覧を閉じる" onClick={() => setIsStaffSummaryOpen(false)} className="rounded-lg p-1 text-slate-500 hover:bg-slate-100"><X size={20} /></button>
             </div>
-
-            {/* 専門的支援計画の各項目（療育内容・結果・今後の予定 を3列横並び） */}
-            <div className="grid grid-cols-12 divide-x divide-slate-200 items-stretch min-h-[130px]">
-              {/* 1. 療育内容 (幅4/12) */}
-              <div className="col-span-4 p-3 bg-slate-50/50 flex flex-col justify-between">
-                <div>
-                  <div className="text-[10px] font-extrabold text-slate-700 mb-1.5 flex items-center justify-between">
-                    <span>療育内容</span>
-                  </div>
-                  {hoveredCellPreview.supportContent && hoveredCellPreview.supportContent.length > 0 ? (
-                    <div className="flex flex-wrap gap-1">
-                      {hoveredCellPreview.supportContent.map((item, idx) => (
-                        <span 
-                          key={idx}
-                          className="px-2 py-0.5 bg-blue-50 text-blue-800 border border-blue-200/80 rounded text-[11px] font-medium shadow-2xs"
-                        >
-                          {item}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <span className="text-slate-400 italic text-[11px]">（未選択）</span>
-                  )}
-                </div>
-                <div className="pt-2 border-t border-slate-200/60 mt-2 space-y-0.5">
-                  {hoveredCellPreview.assignedStaffName ? (
-                    <div className="text-[10px] text-slate-600 flex items-center gap-1">
-                      <span className="text-slate-400">担当:</span>
-                      {hoveredCellPreview.assignedStaffColor && (
-                        <span className="w-2 h-2 rounded-full inline-block shrink-0" style={{ backgroundColor: hoveredCellPreview.assignedStaffColor }} />
-                      )}
-                      <span className="font-bold text-slate-800">{hoveredCellPreview.assignedStaffName}</span>
-                    </div>
-                  ) : hoveredCellPreview.staffName ? (
-                    <div className="text-[10px] text-slate-500">
-                      担当: <span className="font-semibold text-slate-700">{hoveredCellPreview.staffName}</span>
-                    </div>
-                  ) : null}
-                  {hoveredCellPreview.reportStaffName && hoveredCellPreview.reportStaffName !== hoveredCellPreview.assignedStaffName && (
-                    <div className="text-[9px] text-slate-400">
-                      記録作成: {hoveredCellPreview.reportStaffName}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* 2. 療育を行った結果 (幅5/12) */}
-              <div className="col-span-5 p-3 flex flex-col">
-                <div className="text-[10px] font-extrabold text-emerald-800 mb-1.5 flex items-center gap-1">
-                  <span>療育を行った結果</span>
-                </div>
-                {hoveredCellPreview.resultInfo?.trim() ? (
-                  <div className="text-slate-800 text-[11px] leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto font-normal bg-emerald-50/20 p-2 rounded-lg border border-emerald-100/70">
-                    {hoveredCellPreview.resultInfo}
-                  </div>
-                ) : (
-                  <span className="text-slate-400 italic text-[11px]">（未記入）</span>
-                )}
-              </div>
-
-              {/* 3. 今後の予定 (幅3/12) */}
-              <div className="col-span-3 p-3 bg-slate-50/30 flex flex-col">
-                <div className="text-[10px] font-extrabold text-cyan-800 mb-1.5 flex items-center gap-1">
-                  <span>今後の予定</span>
-                </div>
-                {hoveredCellPreview.futurePlan?.trim() ? (
-                  <div className="text-slate-800 text-[11px] leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto font-normal bg-cyan-50/20 p-2 rounded-lg border border-cyan-100/70">
-                    {hoveredCellPreview.futurePlan}
-                  </div>
-                ) : (
-                  <span className="text-slate-400 italic text-[11px]">（未記入）</span>
-                )}
-              </div>
+            <div className="overflow-y-auto p-5">
+              <p className="mb-1 text-sm font-semibold text-slate-700">{officeName}　{year}年{month}月分</p>
+              <p className="mb-4 text-xs text-slate-500">担当児童の必要日数の合計（個別療育分を除く）</p>
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-slate-600"><tr><th className="px-3 py-2 text-left">スタッフ</th><th className="px-3 py-2 text-right">児童数</th><th className="px-3 py-2 text-right">記入数</th></tr></thead>
+                <tbody>{staffWritingRows.map(staff => <tr key={staff.id} className={`border-t border-slate-100 ${!staff.id ? 'bg-amber-50' : ''}`}>
+                  <th className="px-3 py-3 text-left font-medium"><span className="mr-2 inline-block h-2.5 w-2.5 rounded-full" style={{backgroundColor: staff.color}} />{staff.name}</th>
+                  <td className="px-3 py-3 text-right tabular-nums">{staff.childCount}名</td><td className="px-3 py-3 text-right font-semibold tabular-nums">{staff.days}日分</td>
+                </tr>)}</tbody>
+                <tfoot className="border-t border-slate-200 bg-slate-50 font-semibold"><tr><th className="px-3 py-3 text-left">合計</th><td className="px-3 py-3 text-right">{staffWritingRows.reduce((sum, row) => sum + row.childCount, 0)}名</td><td className="px-3 py-3 text-right">{staffWritingRows.reduce((sum, row) => sum + row.days, 0)}日分</td></tr></tfoot>
+              </table>
             </div>
-          </div>
-        </div>,
-        document.body
+          </section>
+        </ViewportModal>
+      )}
+
+      {isClearStaffOpen && (
+        <ViewportModal className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" onKeyDown={event => { if (event.key === 'Escape' && !isSavingStaffAssignments) setIsClearStaffOpen(false); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="clear-staff-title" className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-xl">
+            <h3 id="clear-staff-title" className="border-b border-slate-100 px-5 py-4 font-bold text-slate-800">スタッフの担当を全解除</h3>
+            <div className="space-y-3 p-5 text-sm text-slate-700">
+              <p>{officeName}・{year}年{month}月分のスタッフの担当をすべて解除します。</p>
+              {staffActionError && <p role="alert" className="text-rose-600">{staffActionError}</p>}
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 px-5 py-4">
+              <button autoFocus type="button" disabled={isSavingStaffAssignments} onClick={() => setIsClearStaffOpen(false)} className="rounded-lg px-4 py-2 text-sm text-slate-600 disabled:opacity-50">キャンセル</button>
+              <button type="button" disabled={isSavingStaffAssignments} onClick={() => void handleClearStaffAssignments()} className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{isSavingStaffAssignments ? '解除中…' : '全解除する'}</button>
+            </div>
+          </section>
+        </ViewportModal>
+      )}
+
+      {isDocumentLogOpen&&<DocumentChangeLog officeId={selectedOfficeId} childrenData={allChildrenData} onClose={()=>setIsDocumentLogOpen(false)}/>}
+      {batchPrintTargets&&<BatchSupportPrint key={selectedOfficeId+'_'+currentMonth} targets={batchPrintTargets} officeId={selectedOfficeId} officeName={officeName} month={currentMonth} creator={loginStaffName} onClose={()=>setBatchPrintTargets(null)}/>}
+      {printSource&&!batchPrintTargets&&<SummaryPrintSettings table={printSource} options={{...printSettings,year,month,
+        zeroAttendanceChildIds:childrenData.filter(child=>child.id&&(childAttendanceStats[child.id]?.attendanceCount??0)===0).map(child=>child.id!)}}
+        supportChildCount={summarySupportPrintTargets(orderedChildren,selectedDaysMap,mergedData.dailyReports,mergedData.attendance,mergedData.treeCommFutures,selectedOfficeId,currentMonth).length}
+        onPrintSupport={()=>setBatchPrintTargets(summarySupportPrintTargets(orderedChildren,selectedDaysMap,mergedData.dailyReports,mergedData.attendance,mergedData.treeCommFutures,selectedOfficeId,currentMonth))}
+        onChange={next=>setPrintSettings({orientation:next.orientation,alignment:next.alignment,stripeEvenColumns:next.stripeEvenColumns,repeatDateMiddle:next.repeatDateMiddle,repeatDateRight:next.repeatDateRight,excludeZeroAttendance:next.excludeZeroAttendance,fontSize:next.fontSize,nameFontSize:next.nameFontSize})}
+        onClose={()=>setPrintSource(null)}/>}
+
+      {isAutoSelectOpen && (
+        <ViewportModal className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+          <section role="dialog" aria-modal="true" aria-labelledby="auto-select-title" className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
+              <h3 id="auto-select-title" className="flex items-center gap-2 text-base font-bold text-slate-800"><Wand2 size={18} />採用日を自動選択</h3>
+              <button type="button" aria-label="自動選択を閉じる" onClick={() => setIsAutoSelectOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100"><X size={20} /></button>
+            </div>
+            <div className="space-y-4 overflow-y-auto p-6">
+              <p className="text-sm font-semibold text-slate-700">{year}年{month}月：含めない週を選択</p>
+              <p className="text-xs leading-relaxed text-slate-500">日曜始まりで、月の1日を含む週が第1週です。チェックした週は個別療育日も含めて除外します。</p>
+              <div className="grid grid-cols-3 gap-3">
+                {[1, 2, 3, 4, 5, 6].map(week => (
+                  <label key={week} className="flex cursor-pointer items-center gap-2 rounded-xl border border-slate-200 p-3 text-sm text-slate-700">
+                    <input type="checkbox" checked={autoSelectExcludedWeeks.includes(week)}
+                      onChange={e => setAutoSelectExcludedWeeks(prev => e.target.checked ? [...prev, week] : prev.filter(item => item !== week))}
+                      className="h-4 w-4 accent-green-600" />第{week}週
+                  </label>
+                ))}
+              </div>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                  採用日の間隔
+                  <input type="number" min="1" max="31" step="1" value={autoSelectGap} aria-label="採用日の間隔（日）" aria-invalid={!isAutoSelectGapValid}
+                    onChange={e => setAutoSelectGap(e.target.value)} placeholder="自動"
+                    className="w-24 rounded-lg border border-slate-200 px-3 py-2 text-base font-normal" />日以上
+                </label>
+                <p className="text-xs leading-relaxed text-slate-500">例：3日なら1日の次は4日以降。空欄は従来どおり自動で間隔を調整します。</p>
+                <p className="text-xs leading-relaxed text-slate-500">指定した間隔は個別療育日にも適用します。必要日数に届かない場合の対応は下で選択できます。</p>
+                {!isAutoSelectGapValid && <p role="alert" className="text-xs text-red-600">1〜31日の整数で入力してください。</p>}
+              </div>
+              <fieldset className="space-y-3 rounded-xl border border-slate-200 p-4">
+                <legend className="px-1 text-sm font-bold text-slate-700">必要日数まで選べない場合</legend>
+                {([
+                  ['partial', '条件を守って選べる分だけ採用する'],
+                  ['relax-gap', '間隔を1日ずつ緩めて不足分を補う'],
+                  ['allow-consecutive', '不足する場合だけ、連日の採用を許可する'],
+                  ['keep', '不足する児童の採用日は変更しない']
+                ] as const).map(([value, label]) => <label key={value} className="flex cursor-pointer items-start gap-2 text-sm text-slate-700">
+                  <input type="radio" name="adoption-shortage" value={value} checked={shortagePolicy === value} onChange={() => setShortagePolicy(value)} className="mt-0.5 accent-green-600" />{label}
+                </label>)}
+                {shortagePolicy === 'allow-consecutive' && <p className="text-xs leading-relaxed text-slate-500">まず連日にならない範囲で補い、それでも足りないときだけ連日を許可します。連日の組数をできるだけ少なくし、その範囲で個別療育日を優先します。</p>}
+                {shortagePolicy === 'relax-gap' && <label className="flex items-center gap-2 text-sm text-slate-700">補うときの最小間隔
+                  <input type="number" min="1" max={minimumAutoSelectGap ?? 1} step="1" aria-label="補うときの最小間隔（日）" aria-invalid={!isRelaxedGapValid} value={relaxedGap} onChange={e => setRelaxedGap(e.target.value)} className="w-20 rounded-lg border border-slate-200 px-2 py-1" />日
+                </label>}
+                {!isRelaxedGapValid && <p role="alert" className="text-xs text-red-600">最小間隔は1日から指定した間隔までの整数で入力してください。間隔が空欄の場合は1日です。</p>}
+                <p className="text-xs text-slate-500">除外した週・欠席・キャンセル待ちは補充に使いません。緩めても不足する場合は選べる分だけ採用します。「変更しない」では既存の採用日をそのまま残します。</p>
+              </fieldset>
+              {autoSelectionPreview && <section aria-label="自動選択の事前確認" className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                <h4 className="text-sm font-semibold text-slate-800">条件内で不足する児童：{autoSelectionPreview.details.length}名</h4>
+                {autoSelectionPreview.details.length > 0 ? <div tabIndex={0} role="region" aria-label="児童ごとの採用日数の比較" className="max-h-56 overflow-auto rounded-lg border border-amber-200 bg-white focus-visible:outline-2 focus-visible:outline-emerald-600">
+                  <table className="w-full border-collapse text-xs text-slate-700">
+                    <caption className="sr-only">自動選択の事前確認：日数は反映前の見込みです</caption>
+                    <thead className="sticky top-0 z-10 bg-amber-100 text-slate-600">
+                      <tr>
+                        <th scope="col" className="px-3 py-2.5 text-left font-semibold">児童名</th>
+                        <th scope="col" className="px-2 py-2.5 text-center font-semibold">必要採用数</th>
+                        <th scope="col" className="px-2 py-2.5 text-center font-semibold">採用不足数</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {autoSelectionPreview.details.map(detail => <tr key={detail.id} className="border-t border-amber-100 even:bg-slate-50">
+                        <th scope="row" className="px-3 py-2.5 text-left font-medium">{detail.name}</th>
+                        <td className="px-2 py-2.5 text-center tabular-nums">{detail.target}日</td>
+                        <td className={`px-2 py-2.5 text-center font-semibold tabular-nums ${detail.selected < detail.target ? 'text-rose-600' : 'text-emerald-700'}`}>{Math.max(0, detail.target - detail.selected)}日</td>
+                      </tr>)}
+                    </tbody>
+                  </table>
+                </div> : <p className="text-xs text-slate-600">全児童で目標日数まで選択できます。</p>}
+              </section>}
+              <p className="text-xs leading-relaxed text-slate-500">「反映」で下の方針を適用し、採用日を自動保存します。</p>
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 px-6 py-4">
+              <button type="button" onClick={() => setIsAutoSelectOpen(false)} className="rounded-lg px-4 py-2 text-sm text-slate-600 hover:bg-slate-100">キャンセル</button>
+              <button type="button" disabled={isLoading || isSavingAdoptions || !autoSelectionPreview} onClick={() => { if (!autoSelectionPreview) return; void handleSaveAdoptions(autoSelectionPreview.daysMap); setIsAutoSelectOpen(false); }} className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50"><Check size={16} />反映</button>
+            </div>
+          </section>
+        </ViewportModal>
       )}
 
       {/* 必要日数均等分配モーダル */}
       {isDistributeModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <ViewportModal className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-150">
             {/* モーダルヘッダー */}
             <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-gradient-to-r from-blue-50 to-indigo-50">
@@ -2605,8 +2304,8 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                   <Users size={18} />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-slate-800">個別以外の日数の担当スタッフ分配</h3>
-                  <p className="text-xs text-slate-500">児童単位の不可分ルールを厳守し、均等に分配します</p>
+                  <h3 className="text-base font-bold text-slate-800">担当者を割り振り</h3>
+                  <p className="text-xs text-slate-500">専門的を書く日数を均等に割り振ります</p>
                 </div>
               </div>
               <button 
@@ -2622,13 +2321,23 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
               <div className="p-3 bg-blue-50/70 border border-blue-200/80 rounded-xl text-xs text-blue-900 space-y-1">
                 <div className="font-bold flex items-center gap-1.5 text-blue-950">
                   <Info size={14} className="text-blue-600 shrink-0" />
-                  【分配ルール】児童単位の不可分（分割不可）
+                  割り振りの基準
                 </div>
                 <p className="leading-relaxed text-[11px] text-blue-800">
-                  各児童の「個別以外の日数」は1人の担当スタッフに丸ごと割り当てられます（1人の児童を複数スタッフで分割することはありません）。その上で、チェックされたスタッフ間で担当合計日数の差が最小になるよう均等分配します。
+                  記入日数の差を2日以内に収めつつ、前月と同じ児童の担当が続かないように割り振ります。児童ごとの担当は1人にまとめます。
                 </p>
               </div>
 
+              {staffAssignmentLoadError ? <div role="alert" className="flex items-center justify-between gap-3 rounded-xl bg-rose-50 p-3 text-xs text-rose-700">
+                {staffAssignmentLoadError}<button type="button" onClick={() => setStaffAssignmentReload(value => value + 1)} className="shrink-0 rounded-lg border border-rose-200 px-3 py-2">再読み込み</button>
+              </div> : staffAssignmentLoadedScope !== `${selectedOfficeId}_${currentMonth}` && <p className="text-xs text-slate-500">前月の担当を読み込み中…</p>}
+              <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-700">
+                個別療育の日を記入数に含めない
+                <input type="checkbox" checked={excludeIndividualWritingDays}
+                  disabled={staffAssignmentLoadedScope !== `${selectedOfficeId}_${currentMonth}` || isSavingStaffAssignments}
+                  onChange={event => setExcludeIndividualWritingDays(event.target.checked)}
+                  className="h-4 w-4 shrink-0 accent-indigo-600" />
+              </label>
               {/* オプション: 表の並び順で近接児童をまとめる */}
               <div className="p-3 bg-indigo-50/50 border border-indigo-200/70 rounded-xl">
                 <label className="flex items-start gap-2.5 cursor-pointer select-none">
@@ -2641,7 +2350,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                   <div className="text-xs">
                     <span className="font-bold text-indigo-950">表の並び順（列）で近くの児童をなるべくまとめる（オプション）</span>
                     <p className="text-[11px] text-indigo-800/80 mt-0.5 leading-relaxed">
-                      スタッフごとの担当児童が表上で飛び飛びの列にならず、近い児童同士が隣り合って固まるように分配します。
+                      日数の差が2日以内の範囲で、表の近い児童を優先してまとめます。
                     </p>
                   </div>
                 </label>
@@ -2681,7 +2390,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                     {staffList.map(st => {
                       const isChecked = selectedStaffForDist.has(st.id);
                       const assignedChildren = childrenData.filter(c => c.id && assignedStaffMap[c.id] === st.id);
-                      const currentDays = assignedChildren.reduce((sum, c) => sum + (c.id ? (childAttendanceStats[c.id]?.nonIndividualCount ?? 0) : 0), 0);
+                      const currentDays = assignedChildren.reduce((sum, c) => sum + (c.id ? (childWritingDays[c.id] ?? 0) : 0), 0);
 
                       return (
                         <label
@@ -2709,7 +2418,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                           </div>
 
                           <div className="text-[11px] text-slate-500">
-                            現在: <span className="font-semibold text-slate-700">{assignedChildren.length}名</span> (個別以外: {currentDays}日分)
+                            現在: <span className="font-semibold text-slate-700">{assignedChildren.length}名</span> （記入: {currentDays}日分）
                           </div>
                         </label>
                       );
@@ -2718,13 +2427,21 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                 )}
               </div>
 
+              <div className="overflow-hidden rounded-xl border border-slate-200">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-50 text-slate-500"><tr><th className="px-3 py-2 text-left">スタッフ</th><th className="px-3 py-2 text-right">割り振り後の記入数</th></tr></thead>
+                  <tbody>{staffList.filter(staff => selectedStaffForDist.has(staff.id)).map(staff => <tr key={staff.id} className="border-t border-slate-100"><th className="px-3 py-2 text-left font-medium">{staff.name}</th><td className="px-3 py-2 text-right tabular-nums">{distributionPreview[staff.id]?.totalDays ?? 0}日分</td></tr>)}</tbody>
+                </table>
+                <p className={`border-t border-slate-100 px-3 py-2 text-xs ${distributionRange > 2 ? 'text-amber-700' : 'text-emerald-700'}`}>スタッフ間の差：{distributionRange}日{distributionRange > 2 ? '（児童単位のため、2日以内に収まっていません）' : ''}</p>
+              </div>
+
               {/* 当月の必要日数サマリー */}
               <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
-                <span className="text-slate-600">当月の個別以外の総必要日数（分配対象）</span>
+                <span className="text-slate-600">当月の専門的を書く日数（{excludeIndividualWritingDays ? '個別療育を除く採用日数' : '採用日数'}）</span>
                 <span className="font-bold text-sm text-slate-800">
-                  {childrenData.reduce((sum, c) => sum + (c.id ? (childAttendanceStats[c.id]?.nonIndividualCount ?? 0) : 0), 0)} 日分
+                  {childrenData.reduce((sum, c) => sum + (c.id ? (childWritingDays[c.id] ?? 0) : 0), 0)} 日分
                   <span className="text-[11px] font-normal text-slate-500 ml-1.5">
-                    ({childrenData.filter(c => c.id && (childAttendanceStats[c.id]?.nonIndividualCount ?? 0) > 0).length}名)
+                    ({childrenData.filter(c => c.id && (childWritingDays[c.id] ?? 0) > 0).length}名)
                   </span>
                 </span>
               </div>
@@ -2742,7 +2459,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
               <button
                 type="button"
                 onClick={handleDistributeRequiredDays}
-                disabled={selectedStaffForDist.size === 0 || isSavingStaffAssignments}
+                disabled={selectedStaffForDist.size === 0 || isSavingStaffAssignments || staffAssignmentLoadedScope !== `${selectedOfficeId}_${currentMonth}` || !hasStaffDistributionChanges}
                 className="flex items-center gap-1.5 px-5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all hover:shadow active:scale-95 disabled:opacity-50"
               >
                 {isSavingStaffAssignments ? (
@@ -2754,18 +2471,31 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </ViewportModal>
       )}
 
+      {isSettingsOpen&&settingsTab==='implementation'&&implementationTab!=='author'&&<ViewportModal className="fixed inset-0 z-[10010] flex items-center justify-center bg-slate-900/60 p-4">
+        <section role="dialog" aria-modal="true" aria-labelledby="implementation-operation-title" className="flex h-[90dvh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
+          <header className="flex shrink-0 items-center justify-between border-b bg-slate-50 px-5 py-4"><h2 id="implementation-operation-title" className="font-bold text-slate-800">{implementationTab==='excel-import'?'Excel一括インポート':implementationTab==='excel-export'?'Excel一括上書き':'Excel一括上書き'}</h2><button type="button" aria-label="設定に戻る" onClick={()=>setImplementationTab('author')} className="min-h-10 rounded-xl px-3 text-slate-500 hover:bg-slate-100"><X size={20}/></button></header>
+          <div className="min-h-0 flex-1 overflow-y-auto bg-slate-100/80 p-4 sm:p-6"><p className="mb-4 text-xs text-slate-500">{officeName} ／ {year}年{month}月分</p>
+            {implementationTab==='excel-import'&&<BatchExcelImport key={'import-'+selectedOfficeId+'-'+currentMonth} selectedOfficeId={selectedOfficeId} selectedMonth={currentMonth} childrenData={childrenData} onDataChange={()=>{invalidateMonthlyTreeCommunications(selectedOfficeId,currentMonth);setSettingsDataChanged(true);}}/>}
+            {implementationTab==='excel-export'&&<BatchExcelExport key={'export-'+selectedOfficeId+'-'+currentMonth} selectedMonth={currentMonth} childrenData={childrenData} selectedOfficeId={selectedOfficeId}/>}
+          </div>
+          <footer className="flex shrink-0 justify-end border-t bg-slate-50 px-5 py-3"><button type="button" onClick={()=>setImplementationTab('author')} className="min-h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm">設定に戻る</button></footer>
+        </section>
+      </ViewportModal>}
+      {transferRequest&&<DocumentTransferModal scope={{book:transferRequest.book,officeId:selectedOfficeId,month:currentMonth,children:childrenData}} officeName={officeName} direction={transferRequest.direction} beforeTransfer={async()=>{if(adoptionSaveInFlight.current)throw new Error('採用日の保存中です。保存後にもう一度操作してください。');}} onImported={async()=>{setSettingsDataChanged(true);await fetchData();}} onClose={()=>setTransferRequest(null)} onExcel={transferRequest.book==='implementation'?()=>setImplementationTab(transferRequest.direction==='export'?'excel-export':'excel-import'):transferRequest.direction==='import'?()=>setProfessionalExcelImportOpen(true):undefined}/>}
+      {professionalExcelImportOpen&&<ProfessionalPlanBulkImportModal childrenData={childrenData} officeId={selectedOfficeId} officeName={officeName} onClose={()=>{setProfessionalExcelImportOpen(false);setSettingsDataChanged(true);}}/>}
+      {managerSettingsOffice&&<ProfessionalManagerSettings officeId={managerSettingsOffice.id} officeName={managerSettingsOffice.name} onSaved={()=>{}} onClose={()=>setManagerSettingsOffice(null)}/>}
       {/* 設定モーダル */}
       {isSettingsOpen && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh]">
+        <ViewportModal className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="summary-settings-title" className="flex h-[90dvh] max-h-[900px] w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
             {/* モーダルヘッダー */}
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <div className="px-6 py-4 border-b border-slate-100 flex shrink-0 items-center justify-between bg-slate-50">
+              <h3 id="summary-settings-title" className="text-lg font-bold text-slate-800 flex items-center gap-2">
                 <SettingsIcon size={20} className="text-primary" />
-                カレンダー表示の共通設定
+                実施状況の設定
               </h3>
               <button 
                 onClick={() => setIsSettingsOpen(false)}
@@ -2775,89 +2505,101 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
               </button>
             </div>
 
-            {/* モーダルコンテンツ */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
-              {/* 休みの日設定 */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h4 className="font-bold text-slate-700 text-sm flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
-                    休みの日 (非稼働日)
-                  </h4>
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-slate-500">表示色:</span>
-                    <div className="flex items-center gap-1.5">
-                      {[
-                        { name: 'ローズ', value: '#ffe4e6', class: 'bg-rose-100 border-rose-300' },
-                        { name: 'グレー', value: '#f1f5f9', class: 'bg-slate-100 border-slate-300' },
-                        { name: 'オレンジ', value: '#ffedd5', class: 'bg-amber-100 border-amber-300' },
-                        { name: '赤', value: '#fee2e2', class: 'bg-red-100 border-red-300' },
-                      ].map(c => (
-                        <button
-                          key={c.value}
-                          type="button"
-                          onClick={() => setTempSettings(prev => ({ ...prev, holidayColor: c.value }))}
-                          className={`w-6 h-6 rounded-full border-2 transition-all ${c.class} ${tempSettings.holidayColor === c.value ? 'ring-2 ring-primary ring-offset-1 scale-110' : 'hover:scale-105'}`}
-                          title={c.name}
-                        />
-                      ))}
-                      <input
-                        type="color"
-                        value={tempSettings.holidayColor}
-                        onChange={(e) => setTempSettings(prev => ({ ...prev, holidayColor: e.target.value }))}
-                        className="w-6 h-6 rounded-full border border-slate-300 cursor-pointer overflow-hidden p-0"
-                        title="カスタムカラー"
-                      />
-                    </div>
-                  </div>
-                </div>
+            <div role="tablist" aria-label="実施状況の設定カテゴリ" className="flex shrink-0 overflow-x-auto border-b border-slate-200 bg-white px-4" onKeyDown={event => {
+              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                event.preventDefault();
+                const tabs = ['table', 'implementation','professional','office'] as const;
+                const next = tabs[(tabs.indexOf(settingsTab) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+                setSettingsTab(next);
+                document.getElementById(`summary-settings-tab-${next}`)?.focus();
+              }
+            }}>
+              {([['table', '表の設定'], ['implementation', '専門的支援実施計画の設定'],['professional','個別支援計画書の設定'],['office','事業所設定']] as const).map(([value, label]) => (
+                <button key={value} id={`summary-settings-tab-${value}`} type="button" role="tab" aria-selected={settingsTab === value} aria-controls={`summary-settings-panel-${value}`} tabIndex={settingsTab === value ? 0 : -1}
+                  onClick={() => setSettingsTab(value)} className={`shrink-0 whitespace-nowrap border-b-2 px-4 py-3 text-sm font-semibold transition-colors ${settingsTab === value ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-800'}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
 
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                  <div className="grid grid-cols-7 gap-2 text-center">
-                    {['日', '月', '火', '水', '木', '金', '土'].map((d, index) => {
-                      const isChecked = tempSettings.holidayDaysOfWeek.includes(index);
-                      const isSun = index === 0;
-                      const isSat = index === 6;
-                      
-                      return (
-                        <button
-                          key={`holiday-dow-${index}`}
-                          type="button"
-                          onClick={() => {
-                            setTempSettings(prev => {
-                              const holidayDaysOfWeek = prev.holidayDaysOfWeek.includes(index)
-                                ? prev.holidayDaysOfWeek.filter(x => x !== index)
-                                : [...prev.holidayDaysOfWeek, index].sort();
-                              return { ...prev, holidayDaysOfWeek };
-                            });
-                          }}
-                          className={`py-3 px-1 text-sm font-bold rounded-xl border transition-all flex flex-col items-center justify-center gap-1
-                            ${isChecked 
-                              ? 'bg-rose-500 text-white border-rose-500 shadow-sm scale-105' 
-                              : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'}`}
-                        >
-                          <span className="text-base">{d}曜日</span>
-                          <span className={`text-[10px] ${isChecked ? 'text-rose-100' : isSun ? 'text-red-500' : isSat ? 'text-blue-500' : 'text-slate-400'}`}>
-                            毎週
-                          </span>
-                        </button>
-                      );
-                    })}
+            {/* モーダルコンテンツ */}
+            <div className="min-h-0 flex-1 overflow-y-auto bg-slate-100/80 p-4 sm:p-6 [scrollbar-gutter:stable]">
+              <div role="tabpanel" id="summary-settings-panel-professional" aria-labelledby="summary-settings-tab-professional" hidden={settingsTab!=='professional'} className="mx-auto w-full max-w-3xl">
+                <SettingsGroup title="管理責任者"><div className="space-y-3 p-4"><p className="text-sm text-slate-600">{officeName}の個別支援計画書に使う、児童発達支援管理責任者氏名を設定します。</p><button type="button" disabled={!selectedOfficeId} onClick={()=>setManagerSettingsOffice({id:selectedOfficeId,name:officeName})} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"><SettingsIcon size={18}/>管理責任者氏名の設定</button></div></SettingsGroup>
+                <div className="mt-6"><SettingsGroup title="データの入出力"><button type="button" className={settingsRowClass+' w-full text-left hover:bg-slate-50'} onClick={()=>setTransferRequest({book:'professional',direction:'export'})}><span>全員分をエクスポート</span><span aria-hidden="true">›</span></button><button type="button" className={settingsRowClass+' w-full text-left hover:bg-slate-50'} onClick={()=>setTransferRequest({book:'professional',direction:'import'})}><span>全員分をインポート</span><span aria-hidden="true">›</span></button></SettingsGroup></div>
+              </div>
+              <div role="tabpanel" id="summary-settings-panel-office" aria-labelledby="summary-settings-tab-office" hidden={settingsTab!=='office'} className="mx-auto w-full max-w-3xl">
+                <SettingsGroup title="事業所を選択">
+                  <div className="px-4 py-3"><DropdownSelect label={officeName} value={selectedOfficeId} options={offices.map(office=>({value:office.id,label:office.name}))} onChange={id=>{if(id!==selectedOfficeId){setIsSettingsOpen(false);onOfficeChange(id);}}}/></div>
+                </SettingsGroup>
+              </div>
+              <div role="tabpanel" id="summary-settings-panel-implementation" aria-labelledby="summary-settings-tab-implementation" hidden={settingsTab !== 'implementation'}>
+                <div className="mx-auto w-full max-w-3xl space-y-6">
+
+              <fieldset disabled={isImplementationSettingsLoading || isSavingSettings} className="space-y-6 border-0 p-0">
+                <legend className="sr-only">専門的支援実施計画の作成者・作成日</legend>
+                <SettingsGroup title="適用先">
+                  <div className={settingsRowClass}><span>事業所</span><span className="text-right text-slate-500">{officeName}</span></div>
+                  <div className={settingsRowClass}><span>対象月</span><span className="text-slate-500">{year}年{month}月分</span></div>
+                </SettingsGroup>
+                {isImplementationSettingsLoading ? <p className="text-sm text-slate-500">設定を読み込み中...</p> : <>
+                  <SettingsGroup title="作成日・作成者"><div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-3">
+                    <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-sm text-slate-700"><span>令和（年）</span><input type="number" min="1" step="1" aria-label="作成日の令和年" value={implementationDraft.implementationYear} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationYear: e.target.value }))} className="min-h-10 w-16 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" /></label>
+                    <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-sm text-slate-700"><span>月</span><input type="number" min="1" max="12" step="1" aria-label="作成日の月" value={implementationDraft.implementationMonth} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationMonth: e.target.value }))} className="min-h-10 w-16 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" /></label>
+                    <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-sm text-slate-700"><span>日</span><input type="number" min="1" max="31" step="1" aria-label="作成日の日" value={implementationDraft.implementationDay} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationDay: e.target.value }))} className="min-h-10 w-16 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" /></label>
+                    <label className="flex min-w-0 flex-1 items-center gap-2 text-sm text-slate-700"><span className="shrink-0">作成者</span><input type="text" aria-label="専門的支援実施計画の作成者" value={implementationDraft.implementationCreator} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationCreator: e.target.value }))} className="min-h-10 min-w-0 flex-1 w-32 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" placeholder="作成者名" /></label>
                   </div>
+                  </SettingsGroup>
+                </>}
+                {implementationSettingsError && <p role="alert" className="text-xs text-red-600">{implementationSettingsError}</p>}
+              </fieldset>
                 </div>
+              <div className="mx-auto mt-6 w-full max-w-3xl space-y-6">
+                <SettingsGroup title="データの入出力">
+                  <button type="button" className={settingsRowClass+' w-full text-left hover:bg-slate-50'} onClick={()=>setTransferRequest({book:'implementation',direction:'export'})}><span>全員分をエクスポート</span><span aria-hidden="true">›</span></button>
+                  <button type="button" className={settingsRowClass+' w-full text-left hover:bg-slate-50'} onClick={()=>setTransferRequest({book:'implementation',direction:'import'})}><span>全員分をインポート</span><span aria-hidden="true">›</span></button>
+                </SettingsGroup>
+              </div>
               </div>
 
-              <hr className="border-slate-100" />
+              <div role="tabpanel" id="summary-settings-panel-table" aria-labelledby="summary-settings-tab-table" hidden={settingsTab !== 'table'} className="mx-auto w-full max-w-3xl space-y-6">
+                <SettingsGroup title="表の表示方向">
+                  {([['children-columns', '児童を横に並べる（日付は縦）'], ['children-rows', '児童を縦に並べる（日付は横）']] as const).map(([value, label]) => (
+                    <label key={value} className={settingsRowClass}>{label}<input type="radio" name="summary-table-orientation" checked={tempSettings.tableOrientation === value} onChange={() => setTempSettings(prev => ({ ...prev, tableOrientation: value }))} className="shrink-0 accent-green-600" /></label>
+                  ))}
+                </SettingsGroup>
+                <SettingsGroup title="担当スタッフ欄の表示">
+                    {([['icon', 'アイコン'], ['icon-name', 'アイコン＋名前'], ['name', '名前']] as const).map(([value, label]) => (
+                      <label key={value} className={settingsRowClass}>{label}<input type="radio" name="staff-display-mode" checked={tempSettings.staffDisplayMode === value} onChange={() => setTempSettings(prev => ({ ...prev, staffDisplayMode: value }))} className="accent-green-600" /></label>
+                    ))}
+                </SettingsGroup>
 
+              <SettingsGroup title="フォーカス表示">
+                <label className={settingsRowClass}>
+                  ポインターを合わせた行・列を強調表示する
+                  <input type="checkbox" checked={tempSettings.focusHighlightEnabled}
+                    onChange={e => setTempSettings(prev => ({ ...prev, focusHighlightEnabled: e.target.checked }))}
+                    className="h-4 w-4 shrink-0 accent-green-600" />
+                </label>
+              </SettingsGroup>
+              <SettingsGroup title="日数行の表示・非表示">
+                  {countRowLabels.map(label => (
+                    <label key={label} className={settingsRowClass}>
+                      {label}
+                      <input type="checkbox" checked={!tempSettings.hiddenCountRows.includes(label)}
+                        onChange={e => setTempSettings(prev => ({ ...prev, hiddenCountRows: e.target.checked ? prev.hiddenCountRows.filter(item => item !== label) : [...prev.hiddenCountRows, label] }))}
+                        className="h-4 w-4 accent-green-600" />
+                    </label>
+                  ))}
+              </SettingsGroup>
               {/* 個別療育の日設定 */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
+              <SettingsGroup title="個別療育の日">
+                <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
                   <h4 className="font-bold text-slate-700 text-sm flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
-                    個別療育の日
+                    表示色
                   </h4>
                   <div className="flex items-center gap-3">
-                    <span className="text-xs text-slate-500">表示色:</span>
                     <div className="flex items-center gap-1.5">
                       {[
                         { name: 'スカイブルー', value: '#e0f2fe', class: 'bg-sky-100 border-sky-300' },
@@ -2884,8 +2626,8 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                   </div>
                 </div>
 
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                  <div className="grid grid-cols-7 gap-2 text-center">
+                <div className="p-4">
+                  <div className="grid grid-cols-7 gap-1 sm:gap-2 text-center">
                     {['日', '月', '火', '水', '木', '金', '土'].map((d, index) => {
                       const isChecked = tempSettings.individualDaysOfWeek.includes(index);
                       const isSun = index === 0;
@@ -2908,7 +2650,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                               ? 'bg-blue-500 text-white border-blue-500 shadow-sm scale-105' 
                               : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'}`}
                         >
-                          <span className="text-base">{d}曜日</span>
+                          <span className="text-sm">{d}</span>
                           <span className={`text-[10px] ${isChecked ? 'text-blue-100' : isSun ? 'text-red-500' : isSat ? 'text-blue-500' : 'text-slate-400'}`}>
                             毎週
                           </span>
@@ -2917,22 +2659,93 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                     })}
                   </div>
                 </div>
+              </SettingsGroup>
+
+              {/* 休みの日設定 */}
+              <SettingsGroup title="休みの日（非稼働日）">
+                <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                  <h4 className="font-bold text-slate-700 text-sm flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+                    表示色
+                  </h4>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1.5">
+                      {[
+                        { name: 'ローズ', value: '#ffe4e6', class: 'bg-rose-100 border-rose-300' },
+                        { name: 'グレー', value: '#f1f5f9', class: 'bg-slate-100 border-slate-300' },
+                        { name: 'オレンジ', value: '#ffedd5', class: 'bg-amber-100 border-amber-300' },
+                        { name: '赤', value: '#fee2e2', class: 'bg-red-100 border-red-300' },
+                      ].map(c => (
+                        <button
+                          key={c.value}
+                          type="button"
+                          onClick={() => setTempSettings(prev => ({ ...prev, holidayColor: c.value }))}
+                          className={`w-6 h-6 rounded-full border-2 transition-all ${c.class} ${tempSettings.holidayColor === c.value ? 'ring-2 ring-primary ring-offset-1 scale-110' : 'hover:scale-105'}`}
+                          title={c.name}
+                        />
+                      ))}
+                      <input
+                        type="color"
+                        value={tempSettings.holidayColor}
+                        onChange={(e) => setTempSettings(prev => ({ ...prev, holidayColor: e.target.value }))}
+                        className="w-6 h-6 rounded-full border border-slate-300 cursor-pointer overflow-hidden p-0"
+                        title="カスタムカラー"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-4">
+                  <div className="grid grid-cols-7 gap-1 sm:gap-2 text-center">
+                    {['日', '月', '火', '水', '木', '金', '土'].map((d, index) => {
+                      const isChecked = tempSettings.holidayDaysOfWeek.includes(index);
+                      const isSun = index === 0;
+                      const isSat = index === 6;
+                      
+                      return (
+                        <button
+                          key={`holiday-dow-${index}`}
+                          type="button"
+                          onClick={() => {
+                            setTempSettings(prev => {
+                              const holidayDaysOfWeek = prev.holidayDaysOfWeek.includes(index)
+                                ? prev.holidayDaysOfWeek.filter(x => x !== index)
+                                : [...prev.holidayDaysOfWeek, index].sort();
+                              return { ...prev, holidayDaysOfWeek };
+                            });
+                          }}
+                          className={`py-3 px-1 text-sm font-bold rounded-xl border transition-all flex flex-col items-center justify-center gap-1
+                            ${isChecked 
+                              ? 'bg-rose-500 text-white border-rose-500 shadow-sm scale-105' 
+                              : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'}`}
+                        >
+                          <span className="text-sm">{d}</span>
+                          <span className={`text-[10px] ${isChecked ? 'text-rose-100' : isSun ? 'text-red-500' : isSat ? 'text-blue-500' : 'text-slate-400'}`}>
+                            毎週
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </SettingsGroup>
               </div>
             </div>
 
             {/* モーダルフッター */}
-            <div className="px-6 py-4 border-t border-slate-100 flex items-center justify-end gap-3 bg-slate-50 shrink-0">
+            <div className="min-h-[76px] px-6 py-4 border-t border-slate-100 flex items-center justify-end gap-3 bg-slate-50 shrink-0">
               <button
                 type="button"
                 onClick={() => setIsSettingsOpen(false)}
                 className="px-4 py-2 hover:bg-slate-200 text-slate-600 rounded-xl text-sm font-semibold transition-all"
               >
-                キャンセル
+                {settingsTab === 'table' || (settingsTab === 'implementation' && implementationTab === 'author') ? 'キャンセル' : '閉じる'}
               </button>
+              {(settingsTab === 'table' || (settingsTab === 'implementation' && implementationTab === 'author')) && (
               <button
                 type="button"
                 onClick={handleSaveSettings}
-                disabled={isSavingSettings}
+                disabled={isSavingSettings || isImplementationSettingsLoading || implementationSettingsKey !== `${selectedOfficeId}_${currentMonth}`}
                 className="px-5 py-2 bg-primary hover:bg-primary/90 text-white rounded-xl text-sm font-bold shadow-sm hover:shadow-md transition-all flex items-center gap-1.5 disabled:opacity-50"
               >
                 {isSavingSettings ? (
@@ -2947,9 +2760,10 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                   </>
                 )}
               </button>
+              )}
             </div>
           </div>
-        </div>
+        </ViewportModal>
       )}
 
       {/* Gemini一括登録モーダル */}
@@ -2959,6 +2773,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
         monthStr={currentMonth}
         childrenData={childrenData}
         existingReports={mergedData.dailyReports}
+        onGetSource={getAllTreeCommunicationsText}
         onImport={handleImportAllResults}
       />
     </div>

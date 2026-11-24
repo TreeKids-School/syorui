@@ -1,3 +1,7 @@
+import {measureReads} from '../lib/readDiagnostics';
+import {auditDocumentWrite} from '../lib/documentAudit';
+import {ChildSwitcher} from '../components/ChildSwitcher';
+import {DocumentTypeSelect} from '../components/DocumentTypeSelect';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -18,12 +22,15 @@ import {
 } from 'lucide-react';
 import {
   doc,
-  getDoc,
-  setDoc,
+  getDoc as firestoregetDoc,
+  writeBatch,
   serverTimestamp,
   collection,
-  getDocs
+  getDocs as firestoregetDocs
 } from 'firebase/firestore';
+const getDocs=measureReads('強行シート',firestoregetDocs);
+const getDoc=measureReads('強行シート',firestoregetDoc);
+
 import { auth, db } from '../lib/firebase';
 import { convertToObservation } from '../lib/aiConvert';
 import type { Child } from '../data/mockData';
@@ -69,6 +76,11 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
   const [serviceStaffName, setServiceStaffName] = useState<string>('');
   const [rows, setRows] = useState<ForceSheetRow[]>(DEFAULT_ROWS());
   const [notes, setNotes] = useState<string>('');
+
+  const forceScope=selectedOfficeId+'_'+childId+'_'+serviceDate;
+  const activeForceScope=React.useRef(forceScope);activeForceScope.current=forceScope;
+  const loadedForceScope=React.useRef('');
+  const forceBaseline=React.useRef<any>(null);
 
   // スタッフ一覧
   const [staffList, setStaffList] = useState<StaffMember[]>([]);
@@ -155,10 +167,15 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
   // 2. 強行シートデータのロード
   const loadForceSheet = useCallback(async () => {
     if (!childId || !serviceDate) return;
+    const requestScope=selectedOfficeId+'_'+childId+'_'+serviceDate;
+    loadedForceScope.current='';setRows(DEFAULT_ROWS());setNotes('');setIsConvertingAll(false);setConvertingRowId(null);setConvertingStatus('');
     try {
       const docKey = `${selectedOfficeId}_${childId}_${serviceDate}`;
       const docRef = doc(db, 'forceSheets', docKey);
       const snap = await getDoc(docRef);
+      if(activeForceScope.current!==requestScope)return;
+      loadedForceScope.current=requestScope;
+      forceBaseline.current=snap.exists()?snap.data():null;
 
       if (snap.exists()) {
         const data = snap.data() as ForceSheetDoc;
@@ -192,7 +209,8 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
   // 3. チャットメモ (reports) のロード
   const loadChatMessages = useCallback(async () => {
     if (!childId || !serviceDate) return;
-    setLoadingMessages(true);
+    const requestScope=selectedOfficeId+'_'+childId+'_'+serviceDate;
+    setLoadingMessages(true);setChatMessages([]);
     try {
       const msgs: ChatMessage[] = [];
       const checkedIds = new Set<string>();
@@ -206,6 +224,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
         try {
           const reportRef = doc(db, 'reports', key);
           const snap = await getDoc(reportRef);
+          if(activeForceScope.current!==requestScope)return;
           if (snap.exists()) {
             const data = snap.data();
             const childMsgs = data.messages?.[childId];
@@ -237,12 +256,12 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
         return timeA - timeB;
       });
 
-      setChatMessages(msgs);
+      if(activeForceScope.current===requestScope)setChatMessages(msgs);
     } catch (err) {
       console.error('Failed to load chat messages:', err);
-      setChatMessages([]);
+      if(activeForceScope.current===requestScope)setChatMessages([]);
     } finally {
-      setLoadingMessages(false);
+      if(activeForceScope.current===requestScope)setLoadingMessages(false);
     }
   }, [childId, selectedOfficeId, serviceDate]);
 
@@ -429,6 +448,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
       return;
     }
 
+    const requestScope=forceScope;
     const apiKey = getApiKey();
     if (!apiKey) return;
 
@@ -446,6 +466,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
             row.activity,
             `${i + 1} / ${targetRows.length}`
           );
+          if(activeForceScope.current!==requestScope)return;
           setRows((prev) =>
             prev.map((r) => (r.id === row.id ? { ...r, observation: converted } : r))
           );
@@ -459,6 +480,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
       console.error('Batch AI conversion error:', err);
       alert('AI変換中にエラーが発生しました');
     } finally {
+      if(activeForceScope.current!==requestScope)return;
       setIsConvertingAll(false);
       setConvertingStatus('');
     }
@@ -471,6 +493,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
       return;
     }
 
+    const requestScope=forceScope;
     const apiKey = getApiKey();
     if (!apiKey) return;
 
@@ -482,6 +505,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
         row.activity,
         '1 / 1'
       );
+      if(activeForceScope.current!==requestScope)return;
       setRows((prev) =>
         prev.map((r) => (r.id === row.id ? { ...r, observation: converted } : r))
       );
@@ -490,6 +514,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
       console.error('Single AI conversion error:', err);
       alert(err.message || 'AI変換に失敗しました');
     } finally {
+      if(activeForceScope.current!==requestScope)return;
       setConvertingRowId(null);
     }
   };
@@ -525,6 +550,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
   // 強行シートの保存
   const handleSave = async () => {
     if (!childId || !serviceDate) return;
+    if(loadedForceScope.current!==forceScope){showNotice('書類の読み込みが終わってから保存してください。');return;}
     setSaving(true);
     try {
       const docKey = `${selectedOfficeId}_${childId}_${serviceDate}`;
@@ -541,7 +567,9 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
         updatedAt: serverTimestamp(),
       };
 
-      await setDoc(doc(db, 'forceSheets', docKey), payload, { merge: true });
+      const batch=writeBatch(db);batch.set(doc(db,'forceSheets',docKey),payload,{merge:true});
+      auditDocumentWrite(batch,{officeId:selectedOfficeId,book:'force',childId,month:serviceDate.slice(0,7),documentId:docKey},forceBaseline.current,payload);
+      await batch.commit();if(activeForceScope.current===forceScope)forceBaseline.current=payload;
       setSaveSuccess(true);
       showNotice('強行シートを保存しました');
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -614,14 +642,12 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
             <div className="h-5 w-px bg-slate-200" />
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold text-slate-800">強行シート (支援手順書 兼 記録用紙)</h1>
+                <h1><DocumentTypeSelect childId={childId!} month={serviceDate.slice(0,7)} current="force"/></h1>
                 <span className="px-2.5 py-0.5 bg-rose-50 text-rose-700 text-xs font-bold rounded-full border border-rose-200">
                   重点管理
                 </span>
               </div>
-              <p className="text-xs text-slate-500 mt-0.5">
-                対象児童: <span className="font-bold text-slate-700">{currentChild?.fullName || '読み込み中...'}</span>
-              </p>
+              <ChildSwitcher childId={childId!} name={currentChild?.fullName||'読み込み中…'} childrenData={childrenData} officeId={selectedOfficeId} current="force" month={serviceDate.slice(0,7)}/>
             </div>
           </div>
 

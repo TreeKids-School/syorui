@@ -1,21 +1,26 @@
-import { useState, useEffect, useCallback } from 'react';
+import {setAuditActor,setAuditChildren} from './lib/documentAudit';
+import {getMonitoringPlans} from './lib/monitoringPlans';
+import {measureRead} from './lib/readDiagnostics';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import type { User } from 'firebase/auth';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, getDocs, query } from 'firebase/firestore';
+import { collection, getDocsFromServer, getDocFromServer, doc, query } from 'firebase/firestore';
 import { auth, db } from './lib/firebase';
 import { Layout } from './components/Layout';
 import { ChildList } from './pages/ChildList';
 import { ChildDashboard } from './pages/ChildDashboard';
 import { SupportImplementation } from './pages/SupportImplementation';
 import { ProfessionalPerspective } from './pages/ProfessionalPerspective';
-import { Settings } from './pages/Settings';
 import { Login } from './pages/Login';
 import { MonthlySummary } from './pages/MonthlySummary';
 import { ForceSheet } from './pages/ForceSheet';
 import type { Child } from './data/mockData';
-import { mockChildrenData } from './data/mockData';
-import { matchesOffice } from './lib/officeUtils';
+import { matchesOffice, resolveChildOffices } from './lib/officeUtils';
+import {describeReadError} from './lib/readError';
+import {isArchivedChild} from './lib/childArchive';
+import {resolveStaffAccount} from './lib/staffAccount';
+import {StaffAccountContext} from './components/StaffAccountBadge';
 import './index.css';
 
 const COLLECTION_NAME = 'children';
@@ -23,42 +28,55 @@ const COLLECTION_NAME = 'children';
 
 // ---- 認証済みアプリ本体 ----
 function AppContent({ user }: { user: User }) {
+  const [staffAccount, setStaffAccount] = useState(() => resolveStaffAccount({}, user.displayName || ''));
+  useEffect(()=>setAuditActor(user.uid,staffAccount.name,staffAccount.color),[user.uid,staffAccount]);
   const [selectedOfficeId, setSelectedOfficeId] = useState<string>('LNrWc8f6G703aUYRZ5e2'); // デフォルト: Search
   const [offices, setOffices] = useState<{ id: string, name: string }[]>([]);
   const [children, setChildren] = useState<Child[]>([]);
+  useEffect(()=>setAuditChildren(children),[children]);
   const [allPlans, setAllPlans] = useState<any[]>([]);
+  const [readError, setReadError] = useState('');
+  const [officeInitialized,setOfficeInitialized]=useState(false);
+  const [officeReadError, setOfficeReadError] = useState('');
+  const [hasLoadedChildren, setHasLoadedChildren] = useState(false);
+  const childLoadInFlight = useRef(false);
+  const officeLoadInFlight = useRef(false);
 
   // 初期ロード：事業所一覧の取得と、ログインスタッフの所属事業所を初期選択とする
-  useEffect(() => {
-    const initOffice = async () => {
+  const initOffice = useCallback(async () => {
+      if (officeLoadInFlight.current) return;
+      officeLoadInFlight.current = true;
+      setOfficeReadError('');
       try {
-        const oSnap = await getDocs(query(collection(db, 'offices')));
+        const oSnap = await getDocsFromServer(query(collection(db, 'offices')));
         const oList = oSnap.docs.map(d => ({ id: d.id, name: d.data().name }));
         setOffices(oList);
 
         if (user) {
-          const staffDoc = await getDocs(query(collection(db, 'staff')));
-          let foundStaffOfficeId = '';
-          staffDoc.forEach(d => {
-            if (d.id === user.uid) {
-              foundStaffOfficeId = d.data().officeId || '';
-            }
-          });
+          const staffDoc = await getDocFromServer(doc(db, 'staff', user.uid));
+          setStaffAccount(resolveStaffAccount(staffDoc.exists() ? staffDoc.data() : {}, user.displayName || ''));
+          const foundStaffOfficeId = staffDoc.exists() ? staffDoc.data().officeId || '' : '';
           if (foundStaffOfficeId) {
             setSelectedOfficeId(foundStaffOfficeId);
           }
         }
       } catch (err) {
         console.error("Failed to init office data:", err);
+        setOfficeReadError(describeReadError(err));
+      } finally {
+        officeLoadInFlight.current = false;
+        setOfficeInitialized(true);
       }
-    };
-    initOffice();
   }, [user]);
+  useEffect(() => { void initOffice(); }, [initOffice]);
 
   const fetchChildrenAndPlans = useCallback(async () => {
+    if (childLoadInFlight.current) return;
+    childLoadInFlight.current = true;
+    setReadError('');
     try {
       const q = query(collection(db, COLLECTION_NAME));
-      const snapshot = await getDocs(q);
+      const snapshot = await measureRead('起動時の児童一覧',getDocsFromServer(q));
       const childList = snapshot.docs.map(d => {
         const fd = d.data();
 
@@ -118,13 +136,8 @@ function AppContent({ user }: { user: User }) {
           familyStructure: fd.familyStructure || '',
           features: fd.features || [],
           imageKey: fd.imageKey || (resolvedName ? resolvedName[0] : '?'),
-          offices: Array.from(new Set([
-            ...(Array.isArray(fd.offices) ? fd.offices : fd.offices ? [fd.offices] : []),
-            ...(Array.isArray(fd.tags) ? fd.tags : fd.tags ? [fd.tags] : []),
-            ...(Array.isArray(fd.officeTags) ? fd.officeTags : fd.officeTags ? [fd.officeTags] : []),
-            ...(fd.office ? [fd.office] : []),
-            ...(fd.officeId ? [fd.officeId] : []),
-          ].map(String).filter(Boolean))),
+          offices: resolveChildOffices(fd),
+          archived: isArchivedChild(fd),
           currentPlanEndMonth: fd.currentPlanEndMonth || '',
           serviceType: fd.serviceType || '',
           serviceCategory: fd.serviceCategory || '',
@@ -132,14 +145,15 @@ function AppContent({ user }: { user: User }) {
         };
       }) as Child[];
 
-      const planSnap = await getDocs(query(collection(db, 'professionalPlans')));
-      const planList = planSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      // 通知用の本案は事業所単位の別処理で取得し、児童一覧を巻き込まない。
+      setChildren(childList);
+      setHasLoadedChildren(true);
 
-      setChildren(childList.length === 0 ? mockChildrenData : childList);
-      setAllPlans(planList);
     } catch (error) {
       console.error('[AppContent] Fetch error:', error);
-      setChildren(mockChildrenData);
+      setReadError(describeReadError(error));
+    } finally {
+      childLoadInFlight.current = false;
     }
   }, []);
 
@@ -149,6 +163,11 @@ function AppContent({ user }: { user: User }) {
 
 
 
+  const refreshMonitoring=useCallback(async(refresh=false)=>{
+    if(!officeInitialized)return;
+    try{const plans=await getMonitoringPlans(selectedOfficeId,refresh);setAllPlans(plans);}catch(error){setReadError(describeReadError(error));}
+  },[selectedOfficeId,officeInitialized]);
+  useEffect(()=>{let cancelled=false;if(officeInitialized)getMonitoringPlans(selectedOfficeId).then(plans=>{if(!cancelled)setAllPlans(plans);}).catch(error=>{if(!cancelled)setReadError(describeReadError(error));});return()=>{cancelled=true;};},[selectedOfficeId,officeInitialized]);
   // モニタリング通知判定ヘルパー
   const checkNeedsMonitoring = (childId: string) => {
     const childPlans = allPlans.filter(p => p.childId === childId && p.officeId === selectedOfficeId && p.archived !== true);
@@ -180,7 +199,7 @@ function AppContent({ user }: { user: User }) {
     return false;
   };
 
-  const filteredChildren = children
+  const filteredChildren = useMemo(() => children
     .filter(child => {
       const childOffices = child.offices;
       if (!childOffices || (Array.isArray(childOffices) && childOffices.length === 0)) {
@@ -191,22 +210,33 @@ function AppContent({ user }: { user: User }) {
     .map(child => ({
       ...child,
       needsMonitoring: child.id ? checkNeedsMonitoring(child.id) : false
-    }));
+    })), [children, allPlans, selectedOfficeId]);
+
+  if (!hasLoadedChildren) return <div className="flex min-h-[100dvh] items-center justify-center bg-slate-50 p-6">
+    <section className="w-full max-w-md space-y-4 rounded-2xl border border-slate-200 bg-white p-6 text-slate-700" role={readError ? 'alert' : 'status'}>
+      <h1 className="text-lg font-bold">{readError ? '児童一覧を読み込めませんでした' : '児童一覧を読み込み中…'}</h1>
+      {readError && <><p className="text-sm leading-relaxed">{readError}</p><button type="button" onClick={() => { void initOffice(); void fetchChildrenAndPlans(); }} className="rounded-xl bg-primary px-4 py-2 font-semibold text-white">再読み込み</button></>}
+    </section>
+  </div>;
 
   return (
+    <>
+    {readError && <div role="alert" className="fixed inset-x-4 top-4 z-[10000] rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{readError}<button type="button" className="ml-4 underline" onClick={() => {void fetchChildrenAndPlans();void refreshMonitoring(true);}}>再試行</button></div>}
+    {!readError && officeReadError && <div role="alert" className="fixed inset-x-4 top-4 z-[10000] rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">事業所情報を読み込めませんでした。{officeReadError}<button type="button" className="ml-4 underline" onClick={() => void initOffice()}>再試行</button></div>}
+    <StaffAccountContext.Provider value={staffAccount}>
     <Routes>
       <Route element={
         <Layout 
           childrenData={filteredChildren} 
           selectedOfficeId={selectedOfficeId}
-          offices={offices}
-          onOfficeChange={setSelectedOfficeId}
         />
       }>
-        <Route path="/" element={<ChildList />} />
+        <Route path="/" element={<ChildList childrenData={filteredChildren} selectedOfficeId={selectedOfficeId} offices={offices} onOfficeChange={setSelectedOfficeId} />} />
         <Route path="/monthly-summary" element={
           <MonthlySummary 
+            key={selectedOfficeId}
             childrenData={filteredChildren} 
+            onOfficeChange={setSelectedOfficeId}
             selectedOfficeId={selectedOfficeId} 
             offices={offices} 
           />
@@ -224,11 +254,12 @@ function AppContent({ user }: { user: User }) {
             childrenData={filteredChildren} 
             selectedOfficeId={selectedOfficeId} 
             offices={offices}
-            onReload={fetchChildrenAndPlans}
+            onReload={()=>void refreshMonitoring(true)}
           />
         } />
         <Route path="/children/:childId/support-plan/:month?" element={
           <SupportImplementation 
+            key={selectedOfficeId}
             childrenData={filteredChildren} 
             selectedOfficeId={selectedOfficeId} 
             offices={offices}
@@ -241,13 +272,15 @@ function AppContent({ user }: { user: User }) {
             offices={offices} 
           />
         } />
-        <Route path="/settings" element={<Settings childrenData={filteredChildren} />} />
+        <Route path="/settings" element={<Navigate to="/monthly-summary" replace />} />
 
       </Route>
 
       {/* 未マッチはトップへ */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </StaffAccountContext.Provider>
+    </>
   );
 }
 

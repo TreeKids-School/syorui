@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';import fs from 'node:fs';import vm from 'node:vm';import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url),ts=require('typescript'),exports={};let reads=0,writes=[];const names={home:'管理者 印',search:'別担当'};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/lib/professionalManager.ts','utf8'),{compilerOptions:{module:1,target:9}}).outputText,{exports,require:id=>id==='./documentAudit'?{auditDocumentWrite(){}}:id==='./summaryChildOrder'?{japanDateKey:()=> '2026-11-21'}:id==='./firebase'?{db:{}}:id==='firebase/firestore'?{doc:(_db,collection,id)=>({collection,id}),getDoc:async ref=>{reads++;return {data:()=>({professionalManagerName:names[ref.id]})};},writeBatch:()=>({set:(ref,data)=>{writes.push([ref,data]);names[ref.id]=data.professionalManagerName;},commit:async()=>{}}),serverTimestamp:()=> 'server-time'}:require(id)});
+assert.equal(exports.cleanProfessionalManagerName('担当者　印　印'),'担当者');assert.equal(exports.cleanProfessionalManagerName('印'),'');
+assert.equal(await exports.getProfessionalManager('home'),'管理者');assert.equal(await exports.getProfessionalManager('home'),'管理者');assert.equal(reads,1,'cache per office');
+assert.equal(await exports.getProfessionalManager('search'),'別担当');assert.equal(reads,2);
+await exports.saveProfessionalManager('home','新担当 印');assert.equal(writes[0][0].id,'home');assert.equal(writes[0][1].professionalManagerName,'新担当');
+assert.equal(await exports.getProfessionalManager('home'),'新担当');assert.equal(reads,2,'saving updates cache');assert.equal(await exports.getProfessionalManager('search'),'別担当');
+await exports.getProfessionalManager('home',true);assert.equal(reads,3,'explicit settings open refreshes once');
+console.log('PASS: manager office scope, duplicate stamp cleanup, cached reads and saved default updates');

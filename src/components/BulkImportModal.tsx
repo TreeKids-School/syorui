@@ -1,3 +1,4 @@
+import {ViewportModal} from './ViewportModal';
 import React, { useState } from 'react';
 import { X, FileSpreadsheet, Download, AlertCircle, CheckCircle2, Loader2, UploadCloud } from 'lucide-react';
 import { collection, writeBatch, doc } from 'firebase/firestore';
@@ -98,7 +99,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({ isOpen, onClos
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+    <ViewportModal className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       {/* オーバーレイ */}
       <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={onClose} />
       
@@ -234,6 +235,6 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({ isOpen, onClos
           )}
         </div>
       </div>
-    </div>
+    </ViewportModal>
   );
 };

@@ -1,17 +1,39 @@
+import {createPortal} from 'react-dom';
+import {measureReads} from '../lib/readDiagnostics';
+import {auditDocumentWrite} from '../lib/documentAudit';
+import {DocumentTransferModal} from '../components/DocumentTransferModal';
+import {ProfessionalPlanExportSettings} from '../components/ProfessionalPlanExportSettings';
+import {ProfessionalManagerSettings} from '../components/ProfessionalManagerSettings';
+import {getProfessionalManager,cleanProfessionalManagerName} from '../lib/professionalManager';
+import {ChildSwitcher} from '../components/ChildSwitcher';
+import {primaryVariantIndex,professionalMonthAvailability,saveProfessionalPrimary,archiveProfessionalVariants} from '../lib/professionalVariants';
+import {DocumentIcon} from '../components/DocumentIcon';
+import {copyProfessionalPeriod} from '../lib/copyProfessionalPeriod';
+import {ViewportModal} from '../components/ViewportModal';
+import {createDocumentAutoSaver,type DocumentSaveStatus} from '../lib/documentAutoSave';
+import {professionalPlanDraft,professionalVariantSuffix,type ProfessionalDraft} from '../lib/professionalPlanDraft';
+import {DropdownSelect} from '../components/ui/DropdownSelect';
+import {InlineDateEditor} from '../components/InlineDateEditor';
+import {DocumentTypeSelect} from '../components/DocumentTypeSelect';
+import {HeaderAccountActions} from '../components/HeaderAccountActions';
+import {DropdownPanel} from '../components/ui/DropdownPanel';
+import {menuActionClass} from '../components/ui/menuStyles';
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, ChevronLeft, ChevronRight, Plus, Trash2, Save, Printer, Download, CheckCircle2, UploadCloud, Archive } from 'lucide-react';
+import { ArrowLeft, Plus, Printer, Settings, Download, CheckCircle2, UploadCloud, Archive } from 'lucide-react';
 import {
-  doc, getDoc, setDoc, updateDoc, serverTimestamp, collection, query, where, getDocs, writeBatch
+  doc, serverTimestamp, collection, query, where, getDocs as firestoregetDocs, writeBatch, runTransaction
 } from 'firebase/firestore';
+const getDocs=measureReads('個別支援計画書',firestoregetDocs);
+
 import { db } from '../lib/firebase';
 import type { Child } from '../data/mockData';
 import type { ProfessionalPlanDoc, SupportRow, SupportCategory, ServiceHoursPlan, DaySchedule } from '../types/professionalPlan';
 import { FIVE_AREAS } from '../types/professionalPlan';
-import { exportProfessionalPlan } from '../lib/excelExport';
-import { FloatingActionMenu, type Action } from '../components/FloatingActionMenu';
+import { type Action } from '../components/FloatingActionMenu';
 import { ProfessionalPlanImportModal } from '../components/ProfessionalPlanImportModal';
-import { ProfessionalPlanPrintAll } from '../components/ProfessionalPlanPrintAll';
+import {SupportImplementationPrintSettings} from '../components/SupportImplementationPrintSettings';
+import type {ProfessionalPrintDocument} from '../lib/professionalPlanPrint';
 
 const PLAN_COL = 'professionalPlans';
 const HOURS_PLAN_COL = 'serviceHoursPlans';
@@ -114,6 +136,7 @@ const defaultWeeklyHours = () => {
 
 const defaultHoursPlan = (childId: string, startMonth: string): ServiceHoursPlan => ({
   childId,
+  effectiveStartDate:startMonth+'-01',
   startMonth,
   createdAt: new Date().toISOString().slice(0, 10),
   weeklyHours: defaultWeeklyHours(),
@@ -201,195 +224,130 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
   };
 
   const [currentMonth, setCurrentMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [managerSettingsOpen,setManagerSettingsOpen]=useState(false);
+  const [mobileHeaderSlot,setMobileHeaderSlot]=useState<HTMLElement|null>(null);
+  useEffect(()=>{setMobileHeaderSlot(document.getElementById('mobile-summary-header-slot'));},[]);
+  const [primaryIndex,setPrimaryIndex]=useState(0),[variantRecords,setVariantRecords]=useState<{id:string;variantIndex?:number;isPrimary?:boolean;archived?:boolean}[]>([]);
+  const [archiveDialog,setArchiveDialog]=useState<{items:{collection:string;id:string;label:string;kind:'final'|'draft'|'hours'}[];selected:string[];archive:boolean}|null>(null),[documentActionError,setDocumentActionError]=useState('');
+  const [archivedMonths,setArchivedMonths]=useState<string[]>([]);
+  const explicitVariantScope=React.useRef('');
+  const [variantIndex,setVariantIndex]=useState(0),[variantOptions,setVariantOptions]=useState<number[]>([0]);
+  const [transferDirection,setTransferDirection]=useState<'export'|'import'|null>(null);
+  const [exportDocuments,setExportDocuments]=useState<ProfessionalPrintDocument[]|null>(null);
   const [activeTab, setActiveTab] = useState<'final' | 'draft' | 'hours'>('final');
   const [plan, setPlan] = useState<ProfessionalPlanDoc | null>(null);
   const [hoursPlan, setHoursPlan] = useState<ServiceHoursPlan | null>(null);
-  const [printAllData, setPrintAllData] = useState<{
-    draftPlan: ProfessionalPlanDoc;
-    finalPlan: ProfessionalPlanDoc;
-    hoursPlan: ServiceHoursPlan;
-  } | null>(null);
+  const [printDocuments,setPrintDocuments]=useState<ProfessionalPrintDocument[]|null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
-  const [monthlySettings, setMonthlySettings] = useState<any>(null);
   const [isImportOpen, setIsImportOpen] = useState(false);
 
   // 6ヶ月更新・年単位切り替え用の状態
-  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
   const [availableMonths, setAvailableMonths] = useState<string[]>([]);
   const [showArchived, setShowArchived] = useState<boolean>(false);
   const [periodArchiveMap, setPeriodArchiveMap] = useState<Record<string, boolean>>({});
 
+  const [autoStatus,setAutoStatus]=useState<DocumentSaveStatus>('saved');
+  const [addMonthOpen,setAddMonthOpen]=useState(false),[newMonth,setNewMonth]=useState(''),[addMonthError,setAddMonthError]=useState('');
+  const [addMode,setAddMode]=useState<'blank'|'copy'>('blank'),[copyMonth,setCopyMonth]=useState(''),[copyKinds,setCopyKinds]=useState<('final'|'draft'|'hours')[]>(['final','draft','hours']),[addingMonth,setAddingMonth]=useState(false);
+  const selectionScope=selectedOfficeId+'_'+childId+'_'+currentMonth+'_'+activeTab+'_'+showArchived;
+  const scope=selectionScope+'_'+variantIndex;
+  const activeScope=React.useRef(scope);activeScope.current=scope;
+  const loadedScope=React.useRef(''),readSequence=React.useRef(0);
+  const autoSaver=React.useRef<ReturnType<typeof createDocumentAutoSaver<ProfessionalDraft>>|null>(null);
+  if(!autoSaver.current)autoSaver.current=createDocumentAutoSaver<ProfessionalDraft>(async (target,previous)=>{
+    const content={...target.data};delete content.isPrimary;delete content.archived;
+    const batch=writeBatch(db);
+    batch.set(doc(db,target.collection,target.id),{...content,updatedAt:serverTimestamp()},{merge:true});
+    auditDocumentWrite(batch,{officeId:String(target.data.officeId),book:'professional',childId:String(target.data.childId),month:String(target.data.startMonth),documentId:target.id,label:target.collection==='serviceHoursPlans'?'利用時間':target.data.status==='draft'?'案':'本案'},previous.data,content);
+    await batch.commit();
+  },(key,status)=>{if(activeScope.current===key)setAutoStatus(status);});
+  useEffect(()=>()=>{void autoSaver.current!.flush(scope).catch(()=>{});},[scope]);
+  useEffect(()=>{
+    const flush=()=>{void autoSaver.current!.flushAll().catch(()=>{});};
+    window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',flush);
+    return()=>{window.removeEventListener('pagehide',flush);document.removeEventListener('visibilitychange',flush);flush();};
+  },[]);
+  useEffect(()=>{
+    if(isLoading||loadedScope.current!==scope||!childId||!selectedOfficeId)return;
+    const value=activeTab==='hours'?hoursPlan:plan;
+    if(value)autoSaver.current!.schedule(scope,professionalPlanDraft(value,childId,selectedOfficeId,currentMonth,activeTab));
+  },[plan,hoursPlan,isLoading,scope,childId,selectedOfficeId,currentMonth,activeTab]);
+
   const selectedChild = childId ? childrenData.find((c) => c.id === childId) : null;
 
   // ---- 存在する更新期の月リストを取得 ----
-  const fetchAvailableMonths = useCallback(async () => {
-    if (!childId) return;
-    try {
-      const monthsSet = new Set<string>();
-      const archiveMap: Record<string, boolean> = {};
-
-      // 計画書から取得
-      const qPlan = query(
-        collection(db, PLAN_COL), 
-        where('childId', '==', childId),
-        where('officeId', '==', selectedOfficeId)
-      );
-      const snapPlan = await getDocs(qPlan);
-      snapPlan.forEach(d => {
-        const data = d.data() as ProfessionalPlanDoc & { archived?: boolean };
-        const month = data.startMonth || data.createdAt?.slice(0, 7);
-        if (month && /^\d{4}-\d{2}$/.test(month)) {
-          monthsSet.add(month);
-          if (data.archived === true) {
-            archiveMap[month] = true;
-          }
-        }
+  const fetchAvailableMonths=useCallback(async()=>{
+    if(!childId)return;
+    try{
+      const snapshots=await Promise.all([PLAN_COL,HOURS_PLAN_COL].map(name=>getDocs(query(collection(db,name),where('childId','==',childId),where('officeId','==',selectedOfficeId)))));
+      const availability=professionalMonthAvailability(snapshots.flatMap(snapshot=>snapshot.docs.map(record=>record.data())));
+      setAvailableMonths(availability.months);setPeriodArchiveMap(availability.archiveMap);setArchivedMonths(availability.archivedMonths);
+      setCurrentMonth(previous=>{
+        if(availability.months.includes(previous))return previous;
+        const today=new Date().toISOString().slice(0,7);
+        const active=availability.months.filter(month=>!availability.archiveMap[month]);
+        const options=active.length?active:availability.months;
+        return options.filter(month=>month<=today).at(-1)||options[0]||today;
       });
-
-      // 利用時間から取得
-      const qHours = query(
-        collection(db, HOURS_PLAN_COL), 
-        where('childId', '==', childId),
-        where('officeId', '==', selectedOfficeId)
-      );
-      const snapHours = await getDocs(qHours);
-      snapHours.forEach(d => {
-        const data = d.data() as ServiceHoursPlan & { archived?: boolean };
-        const month = data.startMonth;
-        if (month && /^\d{4}-\d{2}$/.test(month)) {
-          monthsSet.add(month);
-          if (data.archived === true) {
-            archiveMap[month] = true;
-          }
-        }
-      });
-
-      const sorted = Array.from(monthsSet).sort();
-      setAvailableMonths(sorted);
-      setPeriodArchiveMap(archiveMap);
-
-      if (sorted.length > 0) {
-        // アーカイブされていない月を優先して初期値とする
-        const unarchived = sorted.filter(m => !archiveMap[m]);
-        const targetList = unarchived.length > 0 ? unarchived : sorted;
-        
-        const current = new Date().toISOString().slice(0, 7);
-        const best = targetList.filter(m => m <= current).pop() || targetList[0];
-        setCurrentMonth(best);
-        setSelectedYear(parseInt(best.slice(0, 4), 10));
-      } else {
-        const fallback = new Date().toISOString().slice(0, 7);
-        setCurrentMonth(fallback);
-        setSelectedYear(parseInt(fallback.slice(0, 4), 10));
-      }
-    } catch (e) {
-      console.error('fetchAvailableMonths error:', e);
-    }
-  }, [childId, selectedOfficeId]);
+    }catch(error){console.error('fetchAvailableMonths error:',error);}
+  },[childId,selectedOfficeId]);
 
   // ---- データ取得 ----
-  const fetchData = useCallback(async () => {
-    if (!childId || !currentMonth) {
-      setIsLoading(false);
-      return;
-    }
-    setIsLoading(true);
-    try {
-      if (activeTab === 'hours') {
-        const q = query(
-          collection(db, HOURS_PLAN_COL), 
-          where('childId', '==', childId),
-          where('officeId', '==', selectedOfficeId)
-        );
-        const snap = await getDocs(q);
-        
-        let matchedDoc: ServiceHoursPlan | null = null;
-        snap.forEach(d => {
-          const data = d.data() as ServiceHoursPlan;
-          if (data.startMonth === currentMonth) {
-            matchedDoc = { ...data, id: d.id };
-          }
-        });
-
-        if (matchedDoc) {
-          setHoursPlan(matchedDoc);
-        } else {
-          setHoursPlan(defaultHoursPlan(childId, currentMonth));
-        }
-        setPlan(null);
-      } else {
-        const q = query(
-          collection(db, PLAN_COL), 
-          where('childId', '==', childId),
-          where('status', '==', activeTab),
-          where('officeId', '==', selectedOfficeId)
-        );
-        const snap = await getDocs(q);
-        
-        let matchedDoc: ProfessionalPlanDoc | null = null;
-        snap.forEach(d => {
-          const data = d.data() as ProfessionalPlanDoc;
-          const startMonth = data.startMonth || data.createdAt?.slice(0, 7);
-          if (startMonth === currentMonth) {
-            matchedDoc = { ...data, id: d.id };
-          }
-        });
-
-        if (matchedDoc) {
-          setPlan(matchedDoc);
-        } else {
-          const dp = defaultPlan(childId);
-          dp.status = activeTab;
-          dp.startMonth = currentMonth;
-          setPlan(dp);
-        }
-        setHoursPlan(null);
+  const fetchData=useCallback(async()=>{
+    if(!childId||!currentMonth){setIsLoading(false);return;}
+    const localSelectionScope=selectedOfficeId+'_'+childId+'_'+currentMonth+'_'+activeTab+'_'+showArchived;
+    const loadScope=localSelectionScope+'_'+variantIndex,sequence=++readSequence.current;
+    const valid=()=>activeScope.current===loadScope&&sequence===readSequence.current;
+    loadedScope.current='';setPlan(null);setHoursPlan(null);setIsLoading(true);
+    try{
+      await autoSaver.current!.flush(loadScope);if(!valid())return;
+      const defaultManager=activeTab==='hours'?'':await getProfessionalManager(selectedOfficeId).catch(()=> '');if(!valid())return;
+      const name=activeTab==='hours'?HOURS_PLAN_COL:PLAN_COL;
+      const constraints=[where('childId','==',childId),where('officeId','==',selectedOfficeId)];
+      if(activeTab!=='hours')constraints.push(where('status','==',activeTab));
+      const snapshot=await getDocs(query(collection(db,name),...constraints));if(!valid())return;
+      const records=snapshot.docs.map(record=>({...record.data(),id:record.id} as ProfessionalPlanDoc|ServiceHoursPlan)).filter(value=>(value.startMonth||value.createdAt?.slice(0,7))===currentMonth);
+      setVariantRecords(records.map(record=>({id:record.id!,variantIndex:record.variantIndex,isPrimary:record.isPrimary,archived:record.archived})));
+      const eligible=records.filter(record=>(record.archived===true)===showArchived);
+      const preferred=primaryVariantIndex(eligible);setPrimaryIndex(preferred);
+      setVariantOptions(Array.from(new Set(eligible.length?eligible.map(record=>record.variantIndex||0):[0])).sort((a,b)=>a-b));
+      const selected=explicitVariantScope.current===localSelectionScope&&eligible.some(record=>(record.variantIndex||0)===variantIndex)?variantIndex:preferred;
+      explicitVariantScope.current=localSelectionScope;
+      if(selected!==variantIndex){setVariantIndex(selected);return;}
+      let value=eligible.find(record=>(record.variantIndex||0)===selected);
+      if(!value){
+        if(showArchived||records.length)return;
+        value=activeTab==='hours'?defaultHoursPlan(childId,currentMonth):{...defaultPlan(childId),status:activeTab,startMonth:currentMonth};
       }
-    } catch (e) {
-      console.error('fetchData error:', e);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [childId, currentMonth, activeTab, selectedOfficeId]);
+      if(activeTab!=='hours')value={...value,managerName:cleanProfessionalManagerName((value as ProfessionalPlanDoc).managerName)||defaultManager} as ProfessionalPlanDoc;
+      autoSaver.current!.loaded(loadScope,professionalPlanDraft(value,childId,selectedOfficeId,currentMonth,activeTab));
+      loadedScope.current=loadScope;setAutoStatus('saved');
+      if(activeTab==='hours')setHoursPlan(value as ServiceHoursPlan);else setPlan(value as ProfessionalPlanDoc);
+    }catch(error){console.error('fetchData error:',error);if(valid())setAutoStatus('error');}
+    finally{if(valid())setIsLoading(false);}
+  },[childId,currentMonth,activeTab,selectedOfficeId,variantIndex,showArchived]);
 
-  const fetchMonthlySettings = useCallback(async (dateStr: string) => {
-    try {
-      const month = dateStr.slice(0, 7); // YYYY-MM
-      const snap = await getDoc(doc(db, 'monthlySettings', month));
-      if (snap.exists()) {
-        setMonthlySettings(snap.data());
-      } else {
-        setMonthlySettings(null);
-      }
-    } catch (e) {
-      console.error('fetchMonthlySettings error:', e);
-    }
-  }, []);
-
-  // 初回ロード時に availableMonths を取得
   useEffect(() => {
     fetchAvailableMonths();
   }, [fetchAvailableMonths]);
 
   useEffect(() => { 
     fetchData(); 
-    fetchMonthlySettings(currentMonth);
-  }, [fetchData, fetchMonthlySettings, currentMonth]);
+  }, [fetchData]);
 
   // showArchived の変更、または availableMonths の取得後に currentMonth を適切に切り替える
   useEffect(() => {
     if (availableMonths.length === 0) {
       const current = new Date().toISOString().slice(0, 7);
       setCurrentMonth(current);
-      setSelectedYear(parseInt(current.slice(0, 4), 10));
       return;
     }
 
     // 現在の表示モード（アーカイブ閲覧中か否か）に一致する月だけを抽出
     const validMonths = availableMonths.filter(m => {
       const isArchived = periodArchiveMap[m] === true;
-      return isArchived === showArchived;
+      return showArchived?archivedMonths.includes(m):!isArchived;
     });
 
     // もし現在の currentMonth がそのリストに含まれていなければ、切り替えを行う
@@ -399,203 +357,48 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
         const current = new Date().toISOString().slice(0, 7);
         const best = validMonths.filter(m => m <= current).pop() || validMonths[0];
         setCurrentMonth(best);
-        setSelectedYear(parseInt(best.slice(0, 4), 10));
       } else {
         const fallback = new Date().toISOString().slice(0, 7);
         setCurrentMonth(fallback);
-        setSelectedYear(parseInt(fallback.slice(0, 4), 10));
       }
     }
-  }, [showArchived, availableMonths, periodArchiveMap]);
+  }, [showArchived, availableMonths, periodArchiveMap,archivedMonths]);
 
-  // ---- アーカイブ切り替え ----
-  const isCurrentPeriodArchived = periodArchiveMap[currentMonth] === true;
-  const handleToggleArchive = async () => {
-    if (!childId || !currentMonth) return;
-    const targetStatus = !isCurrentPeriodArchived;
-    const confirmMsg = targetStatus 
-      ? `${currentMonth}期をアーカイブしますか？\n(通常の一覧には表示されなくなります)`
-      : `${currentMonth}期のアーカイブを解除しますか？`;
-    if (!window.confirm(confirmMsg)) return;
-
-    setIsLoading(true);
-    try {
-      const batch = writeBatch(db);
-      
-      // 1. 計画書 (本案) のドキュメントID
-      const finalDocId = `${childId}_${currentMonth}_final_${selectedOfficeId}`;
-      batch.set(doc(db, PLAN_COL, finalDocId), {
-        childId,
-        startMonth: currentMonth,
-        status: 'final',
-        officeId: selectedOfficeId,
-        archived: targetStatus,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
-
-      // 2. 計画書 (案) のドキュメントID
-      const draftDocId = `${childId}_${currentMonth}_draft_${selectedOfficeId}`;
-      batch.set(doc(db, PLAN_COL, draftDocId), {
-        childId,
-        startMonth: currentMonth,
-        status: 'draft',
-        officeId: selectedOfficeId,
-        archived: targetStatus,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
-
-      // 3. 利用時間 のドキュメントID
-      const hoursDocId = `${childId}_${currentMonth}_${selectedOfficeId}`;
-      batch.set(doc(db, HOURS_PLAN_COL, hoursDocId), {
-        childId,
-        startMonth: currentMonth,
-        officeId: selectedOfficeId,
-        archived: targetStatus,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
-
-      await batch.commit();
-      alert(targetStatus ? 'アーカイブしました。' : 'アーカイブを解除しました。');
-      await fetchAvailableMonths();
+  const setCurrentAsPrimary=async()=>{
+    const value=activeTab==='hours'?hoursPlan:plan;if(!value?.id||showArchived||isSaving)return;
+    setIsSaving(true);setDocumentActionError('');
+    try{
+      await autoSaver.current!.flushAll();
+      await saveProfessionalPrimary(variantRecords.map(record=>({collection:activeTab==='hours'?HOURS_PLAN_COL:PLAN_COL,id:record.id})),value.id);
       await fetchData();
-      onReload?.();
-    } catch (e) {
-      console.error(e);
-      alert('処理に失敗しました。');
-    } finally {
-      setIsLoading(false);
-    }
+    }catch(error){setDocumentActionError(error instanceof Error?error.message:'メインの変更に失敗しました。');}
+    finally{setIsSaving(false);}
   };
-
-  // ---- 保存 ----
-  const handleSave = async () => {
-    if (!childId || !currentMonth) return;
-    setIsSaving(true);
-    try {
-      if (activeTab === 'hours') {
-        if (!hoursPlan) return;
-        const startMonth = hoursPlan.startMonth || currentMonth;
-        const docId = `${childId}_${startMonth}_${selectedOfficeId}`;
-        await setDoc(doc(db, HOURS_PLAN_COL, docId), {
-          ...hoursPlan,
-          officeId: selectedOfficeId,
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
-      } else {
-        if (!plan) return;
-        const startMonth = plan.startMonth || currentMonth;
-        const status = plan.status || activeTab;
-        const docId = `${childId}_${startMonth}_${status}_${selectedOfficeId}`;
-        await setDoc(doc(db, PLAN_COL, docId), {
-          ...plan,
-          officeId: selectedOfficeId,
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
-      }
-      alert('保存しました。');
-      await fetchAvailableMonths();
-      await fetchData();
-      onReload?.();
-    } catch (e) {
-      alert('保存に失敗しました。');
-    } finally {
-      setIsSaving(false);
-    }
+  const handleToggleArchive=async()=>{
+    if(!childId||isSaving)return;
+    setIsSaving(true);setDocumentActionError('');
+    try{
+      await autoSaver.current!.flushAll();
+      const snapshots=await Promise.all([PLAN_COL,HOURS_PLAN_COL].map(name=>getDocs(query(collection(db,name),where('childId','==',childId),where('officeId','==',selectedOfficeId)))));
+      const items=snapshots.flatMap((snapshot,index)=>snapshot.docs.flatMap(record=>{
+        const value=record.data();if((value.startMonth||value.createdAt?.slice(0,7))!==currentMonth||(value.archived===true)!==showArchived)return [];
+        const kind:'hours'|'final'|'draft'=index===1?'hours':value.status as 'final'|'draft';
+        return [{collection:index===1?HOURS_PLAN_COL:PLAN_COL,id:record.id,kind,label:(kind==='hours'?'利用時間':kind==='draft'?'案':'本案')+professionalVariantSuffix(value.variantIndex)}];
+      }));
+      const current=activeTab==='hours'?hoursPlan?.id:plan?.id;
+      setArchiveDialog({items,selected:items.filter(item=>item.id===current).map(item=>item.collection+'/'+item.id),archive:!showArchived});
+    }catch(error){setDocumentActionError(error instanceof Error?error.message:'書類を取得できませんでした。');}
+    finally{setIsSaving(false);}
   };
-
-  // ---- 専門的支援実施計画へ反映 ----
-  const handleReflectToImplementation = async () => {
-    if (!childId || !currentMonth || !plan || activeTab !== 'final') return;
-    
-    // 開始年月日（createdAt）が必須
-    if (!plan.createdAt) {
-      alert('開始年月日を入力してください。');
-      return;
-    }
-    
-    setIsSaving(true);
-    try {
-      const startMonth = plan.startMonth || plan.createdAt.slice(0, 7); // YYYY-MM
-      
-      // 5ヶ月後を終了月とする（計6ヶ月間）
-      const [sYear, sMonth] = startMonth.split('-').map(Number);
-      let eYear = sYear;
-      let eMonth = sMonth + 5;
-      if (eMonth > 12) {
-        eMonth -= 12;
-        eYear += 1;
-      }
-      const endMonth = `${eYear}-${String(eMonth).padStart(2, '0')}`;
-      
-      const updatedPlan: ProfessionalPlanDoc = {
-        ...plan,
-        isReflected: true,
-        reflectedStartMonth: startMonth,
-        reflectedEndMonth: endMonth,
-      };
-      
-      // プランドキュメントを更新
-      const docId = `${childId}_${plan.startMonth || currentMonth}_final_${selectedOfficeId}`;
-      await setDoc(doc(db, PLAN_COL, docId), {
-        ...updatedPlan,
-        officeId: selectedOfficeId,
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
-      
-      // 児童のドキュメントに更新期限を記録
-      const childrenRef = collection(db, 'children');
-      await updateDoc(doc(childrenRef, childId), {
-        currentPlanEndMonth: endMonth,
-      });
-      
-      setPlan(updatedPlan);
-      alert(`${startMonth} ～ ${endMonth} の期間で専門的支援実施計画に反映しました。`);
-    } catch (e) {
-      console.error(e);
-      alert('反映に失敗しました。');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  // 【テスト用】この児童のすべての支援計画（本案・案）・利用時間データを削除する
-  const handleTestDeleteAllPlans = async () => {
-    if (!childId) return;
-    const confirm1 = window.confirm("【テスト用警告】\nこの児童のすべての専門的支援計画書（本案・案）および利用時間データを完全に削除しますか？\n※他事業所分のデータも含め、この児童に紐づくすべての計画書・利用時間が削除されます。");
-    if (!confirm1) return;
-    const confirm2 = window.confirm("本当に実行しますか？\n登録されているすべての期のデータが完全に失われ、復元できません。");
-    if (!confirm2) return;
-
-    setIsLoading(true);
-    try {
-      const batch = writeBatch(db);
-      
-      // 1. 計画書
-      const qPlan = query(collection(db, PLAN_COL), where('childId', '==', childId));
-      const snapPlan = await getDocs(qPlan);
-      snapPlan.forEach(d => {
-        batch.delete(d.ref);
-      });
-
-      // 2. 利用時間
-      const qHours = query(collection(db, HOURS_PLAN_COL), where('childId', '==', childId));
-      const snapHours = await getDocs(qHours);
-      snapHours.forEach(d => {
-        batch.delete(d.ref);
-      });
-
-      await batch.commit();
-      alert("すべての計画・利用時間データを削除しました。");
-      
-      if (onReload) onReload();
-      await fetchAvailableMonths();
-      await fetchData();
-    } catch (e) {
-      console.error(e);
-      alert("削除に失敗しました。");
-    } finally {
-      setIsLoading(false);
-    }
+  const confirmArchive=async()=>{
+    if(!archiveDialog||!archiveDialog.selected.length||isSaving)return;
+    setIsSaving(true);setDocumentActionError('');
+    try{
+      await autoSaver.current!.flushAll();
+      await archiveProfessionalVariants(archiveDialog.items.filter(item=>archiveDialog.selected.includes(item.collection+'/'+item.id)),archiveDialog.archive);
+      setArchiveDialog(null);await fetchAvailableMonths();await fetchData();
+    }catch(error){setDocumentActionError(error instanceof Error?error.message:'アーカイブの変更に失敗しました。');}
+    finally{setIsSaving(false);}
   };
 
   // 一括インポート処理
@@ -607,12 +410,15 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
 
     setIsLoading(true);
     try {
+      await autoSaver.current!.flushAll();
       const batch = writeBatch(db);
 
+      if(importedPlans.length+importedHours.length>200)throw new Error('1回に取り込める書類は200件までです。ファイルを分割してください。');
       importedPlans.forEach(planDoc => {
         const startMonth = planDoc.startMonth || planDoc.createdAt.slice(0, 7) || currentMonth;
         const status = planDoc.status || 'final';
-        const docId = `${childId}_${startMonth}_${status}_${selectedOfficeId}`;
+        auditDocumentWrite(batch,{officeId:selectedOfficeId,book:'professional',childId,month:startMonth,operation:'Excelインポート'},null,planDoc);
+        const docId = professionalPlanDraft(planDoc,childId,selectedOfficeId,startMonth,status).id;
         
         batch.set(doc(db, PLAN_COL, docId), {
           ...planDoc,
@@ -624,7 +430,8 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
 
       importedHours.forEach(hoursDoc => {
         const startMonth = hoursDoc.startMonth || currentMonth;
-        const docId = `${childId}_${startMonth}_${selectedOfficeId}`;
+        auditDocumentWrite(batch,{officeId:selectedOfficeId,book:'professional',childId,month:startMonth,label:'利用時間',operation:'Excelインポート'},null,hoursDoc);
+        const docId = professionalPlanDraft(hoursDoc,childId,selectedOfficeId,startMonth,'hours').id;
         
         batch.set(doc(db, HOURS_PLAN_COL, docId), {
           ...hoursDoc,
@@ -683,11 +490,6 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
         : prev
     );
 
-  const removeRow = (rowId: string) =>
-    setPlan((prev) =>
-      prev ? { ...prev, supportRows: prev.supportRows.filter((r) => r.id !== rowId) } : prev
-    );
-
   // ---- 利用時間更新ヘルパー ----
   const updateDaySchedule = (day: string, patch: Partial<DaySchedule>) => {
     setHoursPlan(prev => {
@@ -736,130 +538,47 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
   };
 
   // ---- 印刷 ----
-  const handlePrint = () => {
-    document.body.classList.add('print-prof');
-    window.print();
-    window.addEventListener('afterprint', () => {
-      document.body.classList.remove('print-prof');
-    }, { once: true });
-  };
+  const handlePrint = () => {void handlePrintAll();};
 
   // ---- まとめて印刷（一括印刷） ----
-  const handlePrintAll = async () => {
-    if (!childId || !selectedChild) return;
+  const loadPeriodDocuments=async(includeMissing:boolean):Promise<ProfessionalPrintDocument[]>=>{
+    if(!childId||!selectedChild)return [];
+      await autoSaver.current!.flushAll();
+      const [plansSnap,hoursSnap]=await Promise.all([
+        getDocs(query(collection(db,PLAN_COL),where('childId','==',childId),where('officeId','==',selectedOfficeId))),
+        getDocs(query(collection(db,HOURS_PLAN_COL),where('childId','==',childId),where('officeId','==',selectedOfficeId))),
+      ]);
+      const plans=plansSnap.docs.map(record=>({...record.data(),id:record.id} as ProfessionalPlanDoc)).filter(value=>(value.startMonth||value.createdAt?.slice(0,7))===currentMonth&&(value.archived===true)===showArchived);
+      const hours=hoursSnap.docs.map(record=>({...record.data(),id:record.id} as ServiceHoursPlan)).filter(value=>value.startMonth===currentMonth&&(value.archived===true)===showArchived);
+      const defaultManager=await getProfessionalManager(selectedOfficeId).catch(()=> '');
+      const documents:ProfessionalPrintDocument[]=[];
+      const common={childName:selectedChild.fullName,officeName};
+      for(const kind of ['final','draft','hours'] as const){
+        let records:(ProfessionalPlanDoc|ServiceHoursPlan)[]=kind==='hours'?hours:plans.filter(value=>value.status===kind);
+        const editing=kind===activeTab?(kind==='hours'?hoursPlan:plan):null;
+        if(editing)records=[...records.filter(value=>(value.variantIndex||0)!==variantIndex),editing];
+        if(!records.length){if(showArchived||!includeMissing)continue;const initial=kind==='hours'?defaultHoursPlan(childId,currentMonth):{...defaultPlan(childId),startMonth:currentMonth,status:kind};records=[initial];}
+        for(const value of records.sort((a,b)=>(a.variantIndex||0)-(b.variantIndex||0))){
+          const index=value.variantIndex||0,key=kind+':'+index,label=(kind==='final'?'本案':kind==='draft'?'案':'利用時間')+professionalVariantSuffix(index);
+          documents.push(kind==='hours'?{...common,key,label,hoursPlan:value as ServiceHoursPlan}:{...common,key,label,plan:{...value as ProfessionalPlanDoc,status:kind,managerName:cleanProfessionalManagerName((value as ProfessionalPlanDoc).managerName)||defaultManager}});
+        }
+      }
+    return documents;
+  };
+  const handlePrintAll=async()=>{
     setIsSaving(true);
-    try {
-      let dPlan: ProfessionalPlanDoc | null = null;
-      let fPlan: ProfessionalPlanDoc | null = null;
-      let hPlan: ServiceHoursPlan | null = null;
-
-      // 現在表示されているタブのデータを割り当て
-      if (activeTab === 'final') {
-        fPlan = plan;
-      } else if (activeTab === 'draft') {
-        dPlan = plan;
-      } else if (activeTab === 'hours') {
-        hPlan = hoursPlan;
-      }
-
-      // 案の取得
-      if (!dPlan) {
-        const q = query(
-          collection(db, PLAN_COL),
-          where('childId', '==', childId),
-          where('status', '==', 'draft'),
-          where('officeId', '==', selectedOfficeId)
-        );
-        const snap = await getDocs(q);
-        snap.forEach(d => {
-          const data = d.data() as ProfessionalPlanDoc;
-          const startMonth = data.startMonth || data.createdAt?.slice(0, 7);
-          if (startMonth === currentMonth) {
-            dPlan = { ...data, id: d.id };
-          }
-        });
-        if (!dPlan) {
-          dPlan = defaultPlan(childId);
-          dPlan.status = 'draft';
-          dPlan.startMonth = currentMonth;
-        }
-      }
-
-      // 本案の取得
-      if (!fPlan) {
-        const q = query(
-          collection(db, PLAN_COL),
-          where('childId', '==', childId),
-          where('status', '==', 'final'),
-          where('officeId', '==', selectedOfficeId)
-        );
-        const snap = await getDocs(q);
-        snap.forEach(d => {
-          const data = d.data() as ProfessionalPlanDoc;
-          const startMonth = data.startMonth || data.createdAt?.slice(0, 7);
-          if (startMonth === currentMonth) {
-            fPlan = { ...data, id: d.id };
-          }
-        });
-        if (!fPlan) {
-          fPlan = defaultPlan(childId);
-          fPlan.status = 'final';
-          fPlan.startMonth = currentMonth;
-        }
-      }
-
-      // 利用時間の取得
-      if (!hPlan) {
-        const q = query(
-          collection(db, HOURS_PLAN_COL),
-          where('childId', '==', childId),
-          where('officeId', '==', selectedOfficeId)
-        );
-        const snap = await getDocs(q);
-        snap.forEach(d => {
-          const data = d.data() as ServiceHoursPlan;
-          if (data.startMonth === currentMonth) {
-            hPlan = { ...data, id: d.id };
-          }
-        });
-        if (!hPlan) {
-          hPlan = defaultHoursPlan(childId, currentMonth);
-        }
-      }
-
-      setPrintAllData({
-        draftPlan: dPlan,
-        finalPlan: fPlan,
-        hoursPlan: hPlan
-      });
-
-      setTimeout(() => {
-        document.body.classList.add('print-prof-all');
-        window.print();
-        const afterPrintHandler = () => {
-          document.body.classList.remove('print-prof-all');
-          setPrintAllData(null);
-          window.removeEventListener('afterprint', afterPrintHandler);
-        };
-        window.addEventListener('afterprint', afterPrintHandler);
-      }, 300);
-
-    } catch (e) {
-      console.error('一括印刷エラー:', e);
-      alert('一括印刷に必要なデータの取得に失敗しました。');
-    } finally {
-      setIsSaving(false);
-    }
+    try{setPrintDocuments(await loadPeriodDocuments(true));}
+    catch(error){console.error(error);alert('印刷用のデータを取得できませんでした。');}
+    finally{setIsSaving(false);}
+  };
+  const handleExcelExport=async()=>{
+    setIsSaving(true);setDocumentActionError('');
+    try{setExportDocuments(await loadPeriodDocuments(false));}
+    catch(error){console.error(error);setDocumentActionError('エクスポートする書類を取得できませんでした。もう一度お試しください。');}
+    finally{setIsSaving(false);}
   };
 
-  const handleExcelExport = () => {
-    if (!selectedChild || !plan) return;
-    const fileName = `専門的支援計画_${selectedChild.fullName}_${plan.createdAt}`;
-    exportProfessionalPlan(selectedChild.fullName, plan, fileName);
-  };
-
-  const isCurrentMonthArchived = periodArchiveMap[currentMonth] === true;
-  const isPeriodStatusMatch = isCurrentMonthArchived === showArchived;
+  const isPeriodStatusMatch = activeTab==='hours'?hoursPlan!==null:plan!==null;
 
   // ---- ローディング ----
   if (isLoading || childrenData.length === 0) {
@@ -873,218 +592,69 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
   }
 
   // 作成年月日のパース
-  const dateStr = activeTab === 'hours' ? (hoursPlan?.createdAt || '') : (plan?.createdAt || '');
+  const dateStr = activeTab === 'hours' ? (hoursPlan?.effectiveStartDate || hoursPlan?.createdAt || '') : (plan?.createdAt || '');
   const [cy, cm, cd] = dateStr ? dateStr.split('-') : ['', '', ''];
 
   const signDateStr = plan?.signDate || '';
   const [sy, sm, sd] = signDateStr ? signDateStr.split('-') : ['', '', ''];
 
   const mobileActions: Action[] = [
-    { label: '保存する', icon: <Save size={16} />, onClick: handleSave, disabled: isSaving, colorClass: 'bg-primary text-white' },
-    ...(activeTab !== 'hours' ? [{ label: 'Excel出力', icon: <Download size={16} />, onClick: handleExcelExport }] : []),
-    { label: 'まとめて印刷', icon: <Printer size={16} />, onClick: handlePrintAll, colorClass: 'bg-emerald-600 text-white' },
-    { label: '印刷', icon: <Printer size={16} />, onClick: handlePrint },
-    { label: 'Excelインポート', icon: <UploadCloud size={16} />, onClick: () => setIsImportOpen(true) },
+    {label:'エクスポート',icon:<Download size={18}/>,onClick:()=>setTransferDirection('export')},
+    {label:'インポート',icon:<UploadCloud size={18}/>,onClick:()=>setTransferDirection('import')},
     { 
-      label: isCurrentPeriodArchived ? 'アーカイブ解除' : '月をアーカイブ', 
-      icon: <Archive size={16} />, 
+      label: showArchived ? '書類を選んでアーカイブ解除' : '書類を選んでアーカイブ', 
+      icon: <Archive size={18} />, 
       onClick: handleToggleArchive,
-      colorClass: isCurrentPeriodArchived ? 'bg-amber-600 text-white' : 'bg-slate-600 text-white'
+      colorClass: showArchived ? 'bg-amber-600 text-white' : 'bg-slate-600 text-white'
     },
     { 
       label: showArchived ? 'アーカイブ表示中' : 'アーカイブを見る', 
-      icon: <Archive size={16} />, 
+      icon: <Archive size={18} />, 
       onClick: () => setShowArchived(prev => !prev),
       colorClass: showArchived ? 'bg-amber-600 text-white' : ''
     },
-    { 
-      label: '【テスト用】全データ削除', 
-      icon: <Trash2 size={16} />, 
-      onClick: handleTestDeleteAllPlans,
-      colorClass: 'text-red-600'
-    },
-    ...(activeTab !== 'hours' ? [
-      { 
-        label: '設定から反映', 
-        icon: <CheckCircle2 size={16} />, 
-        onClick: () => {
-          if (!monthlySettings) {
-            alert('該当月の設定が見つかりません。設定画面で登録してください。');
-            return;
-          }
-          // 令和年を西暦に簡易変換 (R6 -> 2024)
-          const reiwaOffset = 2018;
-          const year = parseInt(monthlySettings.perspectiveYear || '0', 10) + reiwaOffset;
-          const month = (monthlySettings.perspectiveMonth || '1').padStart(2, '0');
-          const day = (monthlySettings.perspectiveDay || '01').padStart(2, '0');
-          const newDate = `${year}-${month}-${day}`;
-          
-          setPlan(prev => prev ? {
-            ...prev,
-            createdAt: newDate,
-            managerName: monthlySettings.perspectiveCreator || prev.managerName
-          } : prev);
-        },
-        colorClass: 'bg-emerald-600 text-white'
-      }
-    ] : []),
+
   ];
 
   // 任意の月（年月）を追加するハンドラー
-  const handleAddPeriod = () => {
-    const input = window.prompt("追加する月を年月（例：2026-02）で入力してください。", `${selectedYear}-06`);
-    if (!input) return;
-    if (!/^\d{4}-\d{2}$/.test(input)) {
-      alert("入力形式が正しくありません。YYYY-MM形式で入力してください。");
-      return;
-    }
-    
-    // availableMonths に追加
-    if (!availableMonths.includes(input)) {
-      setAvailableMonths(prev => [...prev, input].sort());
-    }
-    
-    // 選択中にする
-    setCurrentMonth(input);
-    
-    // 年も切り替える
-    const yearVal = parseInt(input.split('-')[0], 10);
-    if (!isNaN(yearVal)) {
-      setSelectedYear(yearVal);
-    }
+  const handleAddPeriod=()=>{setNewMonth(currentMonth);setCopyMonth(availableMonths.includes(currentMonth)?currentMonth:availableMonths.slice().sort().at(-1)||'');setAddMode('blank');setCopyKinds(['final','draft','hours']);setAddMonthError('');setAddMonthOpen(true);};
+  const confirmAddMonth=async()=>{
+    if(addingMonth||!childId||!selectedOfficeId)return;
+    if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(newMonth)){setAddMonthError('年月を選択してください。');return;}
+    if(periodArchiveMap[newMonth]){setAddMonthError('この月はアーカイブされています。設定からアーカイブ表示へ切り替えてください。');return;}
+    setAddMonthError('');setAddingMonth(true);
+    try{
+      await autoSaver.current!.flushAll();
+      if(addMode==='copy'){
+        if(availableMonths.includes(newMonth))throw new Error('追加先の月はすでに登録されています。別の年月を選択してください。');
+        const [plans,hours]=await Promise.all([
+          getDocs(query(collection(db,PLAN_COL),where('childId','==',childId),where('officeId','==',selectedOfficeId))),
+          getDocs(query(collection(db,HOURS_PLAN_COL),where('childId','==',childId),where('officeId','==',selectedOfficeId))),
+        ]);
+        const source={plans:plans.docs.map(record=>record.data() as ProfessionalPlanDoc),hours:hours.docs.map(record=>record.data() as ServiceHoursPlan)};
+        if([...source.plans,...source.hours].some(value=>(value.startMonth||value.createdAt?.slice(0,7))===newMonth))throw new Error('追加先の月には書類があります。上書きせず中止しました。');
+        const targets=copyProfessionalPeriod(source,childId,selectedOfficeId,copyMonth,newMonth,copyKinds);
+        await runTransaction(db,async transaction=>{
+          const refs=targets.map(target=>doc(db,target.collection,target.id));
+          const existing=await Promise.all(refs.map(ref=>transaction.get(ref)));
+          if(existing.some(record=>record.exists()))throw new Error('追加先の月には書類があります。上書きせず中止しました。');
+          targets.forEach((target,index)=>{transaction.set(refs[index],{...target.data,updatedAt:serverTimestamp()});auditDocumentWrite(transaction,{officeId:selectedOfficeId,book:'professional',childId,month:newMonth,documentId:target.id,operation:'月をコピーして追加'},null,target.data);});
+        });
+        const copiedKinds=targets.map(target=>target.collection===HOURS_PLAN_COL?'hours':target.data.status as 'final'|'draft');
+        if(!copiedKinds.includes(activeTab))setActiveTab(copiedKinds[0]);
+      }
+      setAvailableMonths(previous=>Array.from(new Set([...previous,newMonth])).sort());
+      setCurrentMonth(newMonth);setAddMonthOpen(false);
+    }catch(error){setAddMonthError(error instanceof Error?error.message:'対象月を追加できませんでした。');}
+    finally{setAddingMonth(false);}
   };
 
-  const getCycleOptionsForYear = () => {
-    const yearPrefix = `${selectedYear}-`;
-    // その年で、かつ showArchived トグルの状態に一致する startMonth を availableMonths から取得
-    const actualMonthsForYear = availableMonths.filter(m => {
-      const isArchived = periodArchiveMap[m] === true;
-      return m.startsWith(yearPrefix) && (isArchived === showArchived);
-    });
+  const monthOptions = Array.from(new Set([...availableMonths.filter(month=>showArchived?archivedMonths.includes(month):!periodArchiveMap[month]),currentMonth]))
+    .sort((a,b)=>b.localeCompare(a)).map(month=>({value:month,label:month.split('-')[0]+'年'+Number(month.split('-')[1])+'月'}));
+  if(!showArchived)monthOptions.push({value:'add',label:'＋ 月を追加'});
 
-    // デフォルトサイクル月は自動生成しない（ユーザー指示による廃止）
-    const allUniqueMonths = Array.from(new Set(actualMonthsForYear)).sort();
-
-    return allUniqueMonths.map(mVal => {
-      const mNum = parseInt(mVal.split('-')[1], 10);
-      return {
-        value: mVal,
-        label: `${mNum}月 (${mVal})`,
-        hasData: availableMonths.includes(mVal)
-      };
-    });
-  };
-
-  const cycleOptions = getCycleOptionsForYear();
-
-  return (
-    <div id="prof-plan-print" className="max-w-6xl mx-auto flex flex-col gap-6 pb-24 animate-fade-in">
-      {/* パンくず & アクションボタン */}
-      <div className="flex items-center justify-between print:hidden">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => navigate(`/children/${childId}`)}
-            className="flex items-center gap-2 text-slate-500 hover:text-slate-800 font-medium transition-colors"
-          >
-            <ArrowLeft size={18} />
-            <span className="text-slate-400">書類一覧</span>
-          </button>
-          <ChevronRight size={14} className="text-slate-300" />
-          <span className="text-sm font-bold text-slate-700">{selectedChild.fullName} 様</span>
-          <ChevronRight size={14} className="text-slate-300" />
-          <span className="text-sm font-semibold text-primary">専門的支援計画書</span>
-        </div>
-        {/* PC表示用：アクションバー（モバイルでは非表示） */}
-        <div className="hidden md:flex gap-3">
-          {activeTab === 'final' && plan?.isReflected && (
-            <div className="flex items-center text-xs font-bold text-emerald-600 bg-emerald-50 px-3 rounded-lg border border-emerald-200 h-9">
-              反映済み ({plan.reflectedStartMonth} 〜 {plan.reflectedEndMonth})
-            </div>
-          )}
-          {activeTab === 'final' && (
-            <button
-              className="btn-secondary flex items-center gap-2 border-emerald-500 text-emerald-700 hover:bg-emerald-50"
-              onClick={handleReflectToImplementation}
-              disabled={isSaving}
-            >
-              <CheckCircle2 size={16} /> 実施計画に反映
-            </button>
-          )}
-          <button
-            className="btn-primary flex items-center gap-2"
-            onClick={handleSave}
-            disabled={isSaving}
-          >
-            <Save size={16} /> {isSaving ? '保存中...' : '保存する'}
-          </button>
-        </div>
-      </div>
-
-      <FloatingActionMenu actions={mobileActions} />
-
-      {/* コントロールパネル（印刷時は非表示） */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-50 border border-slate-200/80 rounded-2xl p-4 print:hidden">
-        <div className="flex items-center gap-4 flex-wrap">
-          {/* 年選択（左右切り替え） */}
-          <div className="flex items-center gap-2 border-r border-slate-200 pr-4">
-            <button
-              onClick={() => setSelectedYear(y => y - 1)}
-              className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-600 transition-colors"
-              title="前年"
-            >
-              <ChevronLeft size={16} />
-            </button>
-            <span className="font-black text-slate-800 text-sm tracking-tight">{selectedYear} 年</span>
-            <button
-              onClick={() => setSelectedYear(y => y + 1)}
-              className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-600 transition-colors"
-              title="翌年"
-            >
-              <ChevronRight size={16} />
-            </button>
-          </div>
-
-
-          {/* 6ヶ月更新のサイクル月ボタン */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">更新月選択:</span>
-            <div className="flex gap-2 items-center flex-wrap">
-              {cycleOptions.map(opt => {
-                const isSelected = currentMonth === opt.value;
-                const hasData = opt.hasData;
-                return (
-                  <button
-                    key={opt.value}
-                    onClick={() => setCurrentMonth(opt.value)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all relative ${
-                      isSelected
-                        ? 'bg-primary text-white shadow-sm'
-                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    <span>{opt.label}</span>
-                    {hasData && !isSelected && (
-                      <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-green-500 rounded-full border border-white" title="データあり" />
-                    )}
-                  </button>
-                );
-              })}
-              
-              {/* 月を追加ボタン */}
-              {!showArchived && (
-                <button
-                  onClick={handleAddPeriod}
-                  className="px-2 py-1.5 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 border border-slate-200 border-dashed text-slate-500 hover:text-slate-700 transition-all flex items-center gap-1"
-                  title="新しい月を追加"
-                >
-                  <Plus size={13} />
-                  <span>月を追加</span>
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
+  const documentControls = (
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 print:hidden">
         {/* タブ切り替え */}
         <div className="flex bg-slate-200/60 p-1 rounded-xl">
           <button
@@ -1095,7 +665,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
-            専門的支援計画 (本案)
+            本案
           </button>
           <button
             onClick={() => setActiveTab('draft')}
@@ -1105,7 +675,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
-            専門的支援計画 (案)
+            案
           </button>
           <button
             onClick={() => setActiveTab('hours')}
@@ -1115,17 +685,66 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
-            個別支援計画別表 (利用時間)
+            利用時間
           </button>
+        </div>
+        {variantOptions.length>1&&<DropdownSelect label="同月の書類を選択" value={String(variantIndex)} options={variantOptions.map(index=>({value:String(index),label:(activeTab==='final'?'本案':activeTab==='draft'?'案':'利用時間')+professionalVariantSuffix(index)+(!showArchived&&index===primaryIndex?'（メイン）':'')}))} onChange={value=>{explicitVariantScope.current=selectionScope;setVariantIndex(Number(value));}}/>}
+        {!showArchived&&variantOptions.length>1&&(variantIndex===primaryIndex?<span className="inline-flex items-center gap-1 text-xs font-semibold text-primary"><CheckCircle2 size={16}/>メイン</span>:<button type="button" disabled={isSaving} onClick={()=>void setCurrentAsPrimary()} className="min-h-10 rounded-xl border border-slate-200 px-3 text-sm text-slate-700 disabled:opacity-50">メインに設定</button>)}
+        <div className="ml-auto"><InlineDateEditor key={childId+'_'+selectedOfficeId+'_'+currentMonth+'_'+activeTab+'_'+variantIndex} label={activeTab==='draft'?'作成年月日':'開始年月日'} value={dateStr} onChange={value=>{if(activeTab==='hours')setHoursPlan(previous=>previous?{...previous,effectiveStartDate:value}:previous);else update('createdAt',value);}}/></div>
+      </div>
+  );
+
+  const settingsMenu=(<DropdownPanel itemCount={mobileActions.length+1} preferredHeight={(mobileActions.length+1)*64+56} label="個別支援計画書の設定" icon={<Settings size={20}/>}>
+            {close=><><button type="button" className={menuActionClass} onClick={()=>{close();setManagerSettingsOpen(true);}}><DocumentIcon type="professional"/>管理責任者氏名の設定</button>{mobileActions.filter(action=>!['保存する','印刷'].includes(action.label)).map(action=><button type="button" key={action.label} className={menuActionClass+(showArchived&&action.label==='アーカイブ表示中'?' bg-amber-100 text-amber-900':'')} disabled={action.disabled||isSaving} onClick={()=>{close();action.onClick();}}>{action.icon}{action.label}</button>)}</>}
+          </DropdownPanel>);
+  return (
+    <div id="prof-plan-print" className="max-w-6xl mx-auto flex flex-col gap-6 pb-24 animate-fade-in">
+      {showArchived&&<div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-3 text-sm font-semibold text-amber-900 print:hidden"><span className="flex items-center gap-2"><Archive size={18}/>アーカイブ表示中</span><button type="button" onClick={()=>setShowArchived(false)} className="min-h-10 rounded-xl border border-amber-300 bg-white px-3 text-sm">通常表示に戻る</button></div>}
+      {documentActionError&&<p role="alert" className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700 print:hidden">{documentActionError}</p>}
+      {archiveDialog&&<ViewportModal className="fixed inset-0 z-[10020] flex items-center justify-center bg-slate-900/50 p-4"><section role="dialog" aria-modal="true" aria-labelledby="archive-documents-title" className="max-h-[90dvh] w-full max-w-lg space-y-4 overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"><h2 id="archive-documents-title" className="text-lg font-bold">{currentMonth}：{archiveDialog.archive?'アーカイブする書類':'アーカイブを解除する書類'}</h2><p className="text-sm text-slate-500">選択した書類だけを変更します。</p><div className="space-y-2">{archiveDialog.items.map(item=><label key={item.collection+'/'+item.id} className="flex min-h-12 items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 text-sm"><input type="checkbox" disabled={isSaving} checked={archiveDialog.selected.includes(item.collection+'/'+item.id)} onChange={event=>setArchiveDialog(previous=>previous?{...previous,selected:event.target.checked?[...previous.selected,item.collection+'/'+item.id]:previous.selected.filter(key=>key!==item.collection+'/'+item.id)}:previous)}/><DocumentIcon type="professional"/>{item.label}</label>)}</div>{!archiveDialog.items.length&&<p className="text-sm text-slate-500">対象の書類がありません。</p>}<div className="space-y-3">{documentActionError&&<p role="alert" className="text-sm text-rose-600">{documentActionError}</p>}<div className="flex justify-end gap-3"><button type="button" disabled={isSaving} onClick={()=>setArchiveDialog(null)} className="min-h-10 rounded-xl border px-4 text-sm">キャンセル</button><button type="button" disabled={isSaving||!archiveDialog.selected.length} onClick={()=>void confirmArchive()} className="min-h-10 rounded-xl bg-primary px-4 text-sm text-white disabled:opacity-40">{isSaving?'変更中…':'選択した'+archiveDialog.selected.length+'件を'+(archiveDialog.archive?'アーカイブ':'解除')}</button></div></div></section></ViewportModal>}
+
+      {addMonthOpen&&<ViewportModal className="fixed inset-0 z-[10020] flex items-center justify-center bg-slate-900/50 p-4" onKeyDown={event=>{if(event.key==='Escape'&&!addingMonth)setAddMonthOpen(false);}}>
+        <form role="dialog" aria-modal="true" aria-labelledby="add-month-title" onSubmit={event=>{event.preventDefault();void confirmAddMonth();}} className="max-h-[90dvh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl bg-white p-6 shadow-xl">
+          <h2 id="add-month-title" className="text-lg font-bold">対象月を追加</h2>
+          <fieldset disabled={addingMonth} className="space-y-4 disabled:opacity-60">
+            <label className="block space-y-2 text-sm"><span>追加先の年月</span><input autoFocus required type="month" value={newMonth} onChange={event=>setNewMonth(event.target.value)} className="min-h-10 w-full rounded-xl border border-slate-200 px-3"/></label>
+            <div className="flex flex-wrap gap-4 text-sm"><label className="flex items-center gap-2"><input type="radio" name="add-mode" checked={addMode==='blank'} onChange={()=>setAddMode('blank')}/>空白で追加</label><label className="flex items-center gap-2"><input type="radio" name="add-mode" checked={addMode==='copy'} onChange={()=>setAddMode('copy')}/>登録済みの月をコピー</label></div>
+            {addMode==='copy'&&<div className="space-y-3 rounded-xl bg-slate-50 p-4"><p className="text-sm font-semibold">コピー元の月</p><DropdownSelect label={copyMonth?copyMonth.split('-')[0]+'年'+Number(copyMonth.split('-')[1])+'月':'コピー元の月'} value={copyMonth} onChange={setCopyMonth} options={availableMonths.slice().sort((a,b)=>b.localeCompare(a)).map(month=>({value:month,label:month.split('-')[0]+'年'+Number(month.split('-')[1])+'月'}))}/><div className="flex flex-wrap gap-4 text-sm">{([{value:'final',label:'本案'},{value:'draft',label:'案'},{value:'hours',label:'利用時間'}] as const).map(kind=><label key={kind.value} className="flex items-center gap-2"><input type="checkbox" checked={copyKinds.includes(kind.value)} onChange={event=>setCopyKinds(previous=>event.target.checked?[...previous,kind.value]:previous.filter(value=>value!==kind.value))}/>{kind.label}</label>)}</div><p className="text-xs leading-relaxed text-slate-500">コピー元に登録されている書類を追加します。開始日・作成日は追加月の1日とし、保護者署名・同意日・過去の反映期間は引き継ぎません。</p></div>}
+          </fieldset>
+          {addMonthError&&<p role="alert" className="text-sm text-rose-600">{addMonthError}</p>}
+          <p className="text-xs text-slate-500">追加した後の変更は自動保存されます。登録済みの月へのコピー上書きは行いません。</p>
+          <div className="flex justify-end gap-3"><button type="button" disabled={addingMonth} onClick={()=>setAddMonthOpen(false)} className="min-h-10 rounded-xl border px-4 text-sm disabled:opacity-50">キャンセル</button><button type="submit" disabled={addingMonth||(addMode==='copy'&&(!copyMonth||!copyKinds.length))} className="min-h-10 rounded-xl bg-primary px-4 text-sm text-white disabled:opacity-50">{addingMonth?'追加中…':addMode==='copy'?'コピーして追加':'追加して開く'}</button></div>
+        </form>
+      </ViewportModal>}
+      {autoStatus==='error'&&<div role="alert" className="flex items-center justify-end gap-2 text-sm text-rose-600 print:hidden"><span>{loadedScope.current===scope?'自動保存に失敗しました。入力内容は画面に保持しています。':'書類を読み込めませんでした。'}</span><button type="button" onClick={()=>{if(loadedScope.current!==scope)void fetchData();else void autoSaver.current!.flush(scope).catch(()=>{});}} className="min-h-10 rounded-xl border px-3">再試行</button></div>}
+      {mobileHeaderSlot&&createPortal(<div className="mobile-document-header pb-2">
+        <DocumentTypeSelect childId={childId!} month={currentMonth} current="professional"/>
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="min-w-0 flex-1"><ChildSwitcher childId={childId!} name={selectedChild.fullName} childrenData={childrenData} officeId={selectedOfficeId} current="professional" month={currentMonth}/></div>
+          <DropdownSelect label={currentMonth.replace('-', '年')+'月'} value={currentMonth} options={monthOptions} onChange={month=>{if(month==='add')handleAddPeriod();else setCurrentMonth(month);}}/>
+          {settingsMenu}
+        </div>
+      </div>,mobileHeaderSlot)}
+      <div className={'document-desktop-header flex shrink-0 flex-col justify-between gap-3 rounded-2xl border px-5 py-3 shadow-sm print:hidden lg:flex-row lg:items-center '+(showArchived?'border-amber-300 bg-amber-50':'border-slate-200/80 bg-white')}>
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" aria-label="実施状況の表へ戻る" onClick={()=>navigate('/monthly-summary')} className="shrink-0 rounded-xl p-2 text-slate-500 hover:bg-slate-100"><ArrowLeft size={20}/></button>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1"><h2 className="min-w-0"><DocumentTypeSelect childId={childId!} month={currentMonth} current="professional"/></h2><ChildSwitcher childId={childId!} name={selectedChild.fullName} childrenData={childrenData} officeId={selectedOfficeId} current="professional" month={currentMonth}/></div>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2.5">
+          <DropdownSelect label="対象月を選択" value={currentMonth} options={monthOptions} onChange={month=>{if(month==='add')handleAddPeriod();else setCurrentMonth(month);}}/>
+          <button type="button" aria-label="印刷" title="印刷設定とプレビュー" onClick={handlePrint} className="flex min-h-10 min-w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-100"><Printer size={20}/></button>
+          {settingsMenu}
+          <HeaderAccountActions/>
         </div>
       </div>
 
-      {/* ======== 書類本体：専門的支援計画（本案 / 案） ======== */}
+      {/* ======== 書類本体：個別支援計画書（本案 / 案） ======== */}
       {activeTab !== 'hours' && plan && isPeriodStatusMatch && (
         <div className="bg-white border border-slate-300 shadow-sm p-6 print:shadow-none print:border-0 print:p-0" style={{ fontFamily: "'Noto Sans JP', sans-serif" }}>
+          {documentControls}
 
           {/* ===== ヘッダー ===== */}
-          <div className="flex items-start justify-between mb-2">
+          <div className="hidden print:flex items-start justify-between mb-2">
             {/* 左：利用児氏名 */}
             <div className="flex items-baseline gap-1 text-sm">
               <span className="whitespace-nowrap">利用児氏名：</span>
@@ -1147,37 +766,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                 </span>
               </h1>
             </div>
-            {/* 右：作成年月日 */}
-            <div className="text-sm flex items-baseline gap-1 whitespace-nowrap">
-              <span>{activeTab === 'final' ? '開始年月日：' : '作成年月日：'}</span>
-              <input
-                type="number"
-                className="outline-none bg-transparent w-12 border-b border-slate-400 text-center"
-                style={{ touchAction: 'pan-y' }}
-                value={cy || ''}
-                onChange={(e) => update('createdAt', `${e.target.value}-${cm || ''}-${cd || ''}`)}
-                placeholder="年"
-              />
-              <span>年</span>
-              <input
-                type="number"
-                className="outline-none bg-transparent w-8 border-b border-slate-400 text-center"
-                style={{ touchAction: 'pan-y' }}
-                value={cm || ''}
-                onChange={(e) => update('createdAt', `${cy || ''}-${e.target.value}-${cd || ''}`)}
-                placeholder="月"
-              />
-              <span>月</span>
-              <input
-                type="number"
-                className="outline-none bg-transparent w-8 border-b border-slate-400 text-center"
-                style={{ touchAction: 'pan-y' }}
-                value={cd || ''}
-                onChange={(e) => update('createdAt', `${cy || ''}-${cm || ''}-${e.target.value}`)}
-                placeholder="日"
-              />
-              <span>日</span>
-            </div>
+            <span className="text-sm">{activeTab==='final'?'開始年月日：':'作成年月日：'}{dateStr?dateStr.replace(/-/g,'/'):''}</span>
           </div>
 
           {/* ===== 枠線テーブル全体 ===== */}
@@ -1401,13 +990,6 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                             value={row.priority}
                             onChange={(e) => updateRow(row.id, { priority: e.target.value })}
                           />
-                          <button
-                            className="text-slate-300 hover:text-red-400 transition-colors print:hidden"
-                            title="行を削除"
-                            onClick={() => removeRow(row.id)}
-                          >
-                            <Trash2 size={12} />
-                          </button>
                         </div>
                       </td>
                     </tr>
@@ -1475,6 +1057,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                   style={{ touchAction: 'pan-y' }}
                   value={plan.managerName}
                   onChange={(e) => update('managerName', e.target.value)}
+                  onBlur={()=>update('managerName',cleanProfessionalManagerName(plan.managerName))}
                   placeholder="氏名を入力"
                 />
                 <span className="text-sm ml-2">印</span>
@@ -1529,8 +1112,9 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
       {/* ======== 書類本体：個別支援計画別表（利用時間） ======== */}
       {activeTab === 'hours' && hoursPlan && isPeriodStatusMatch && (
         <div className="bg-white border border-slate-300 shadow-sm p-6 print:shadow-none print:border-0 print:p-0" style={{ fontFamily: "'Noto Sans JP', sans-serif" }}>
+          {documentControls}
           {/* ===== ヘッダー ===== */}
-          <div className="flex items-start justify-between mb-4">
+          <div className="hidden print:flex items-start justify-between mb-4">
             <div className="text-left">
               <h1 className="text-xl font-black tracking-wide">個別支援計画別表</h1>
             </div>
@@ -1598,15 +1182,15 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                         <div className="flex items-center justify-center gap-0.5">
                           <input
                             type="text"
-                            placeholder="14:00"
+                            placeholder=""
                             className="w-12 text-center border-b border-slate-200 outline-none focus:border-primary text-xs"
                             value={sched.startTime || ''}
                             onChange={(e) => updateDaySchedule(day, { startTime: e.target.value })}
                           />
-                          <span className="text-slate-400">~</span>
+                          <span className="text-slate-400">{sched.startTime || sched.endTime ? '~' : ''}</span>
                           <input
                             type="text"
-                            placeholder="18:00"
+                            placeholder=""
                             className="w-12 text-center border-b border-slate-200 outline-none focus:border-primary text-xs"
                             value={sched.endTime || ''}
                             onChange={(e) => updateDaySchedule(day, { endTime: e.target.value })}
@@ -1624,7 +1208,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                     const sched = hoursPlan.weeklyHours[day] || defaultDaySchedule();
                     return (
                       <td key={day} style={{ border: '1.5px solid #374151' }} className="p-2 text-center font-bold text-slate-700 bg-slate-50/30">
-                        {formatMinutes(sched.totalMinutes)}
+                        {sched.startTime || sched.endTime ? formatMinutes(sched.totalMinutes) : ''}
                       </td>
                     );
                   })}
@@ -1646,15 +1230,15 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                         <div className="flex items-center justify-center gap-0.5">
                           <input
                             type="text"
-                            placeholder="13:00"
+                            placeholder=""
                             className="w-12 text-center border-b border-slate-200 outline-none focus:border-primary text-xs"
                             value={sched.beforeExtStartTime || ''}
                             onChange={(e) => updateDaySchedule(day, { beforeExtStartTime: e.target.value })}
                           />
-                          <span className="text-slate-400">~</span>
+                          <span className="text-slate-400">{sched.beforeExtStartTime || sched.beforeExtEndTime ? '~' : ''}</span>
                           <input
                             type="text"
-                            placeholder="14:00"
+                            placeholder=""
                             className="w-12 text-center border-b border-slate-200 outline-none focus:border-primary text-xs"
                             value={sched.beforeExtEndTime || ''}
                             onChange={(e) => updateDaySchedule(day, { beforeExtEndTime: e.target.value })}
@@ -1675,15 +1259,15 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                         <div className="flex items-center justify-center gap-0.5">
                           <input
                             type="text"
-                            placeholder="18:00"
+                            placeholder=""
                             className="w-12 text-center border-b border-slate-200 outline-none focus:border-primary text-xs"
                             value={sched.afterExtStartTime || ''}
                             onChange={(e) => updateDaySchedule(day, { afterExtStartTime: e.target.value })}
                           />
-                          <span className="text-slate-400">~</span>
+                          <span className="text-slate-400">{sched.afterExtStartTime || sched.afterExtEndTime ? '~' : ''}</span>
                           <input
                             type="text"
-                            placeholder="19:00"
+                            placeholder=""
                             className="w-12 text-center border-b border-slate-200 outline-none focus:border-primary text-xs"
                             value={sched.afterExtEndTime || ''}
                             onChange={(e) => updateDaySchedule(day, { afterExtEndTime: e.target.value })}
@@ -1702,7 +1286,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                     const totalExt = sched.beforeExtMinutes + sched.afterExtMinutes;
                     return (
                       <td key={day} style={{ border: '1.5px solid #374151' }} className="p-2 text-center font-bold text-slate-700 bg-slate-50/30">
-                        {formatMinutes(totalExt)}
+                        {sched.beforeExtStartTime || sched.beforeExtEndTime || sched.afterExtStartTime || sched.afterExtEndTime ? formatMinutes(totalExt) : ''}
                       </td>
                     );
                   })}
@@ -1751,13 +1335,15 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
 
       {/* データがステータス不一致または存在しない場合のプレースホルダー */}
       {!isPeriodStatusMatch && (
-        <div className="bg-white border border-slate-200 rounded-3xl p-20 text-center text-slate-400">
+        <div className="bg-white border border-slate-200 rounded-3xl p-6 text-center text-slate-400">
+          {documentControls}
           {showArchived 
             ? 'アーカイブされた書類はありません。' 
             : 'この月はアーカイブされています。「アーカイブを見る」をONにしてご覧ください。'}
         </div>
       )}
 
+      {managerSettingsOpen&&<ProfessionalManagerSettings key={selectedOfficeId} officeId={selectedOfficeId} officeName={officeName} currentName={plan?.managerName} onSaved={(name,apply)=>{if(apply)setPlan(previous=>previous?{...previous,managerName:name}:previous);}} onClose={()=>setManagerSettingsOpen(false)}/>}
       {/* インポートモーダル */}
       <ProfessionalPlanImportModal
         isOpen={isImportOpen}
@@ -1766,16 +1352,10 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
         childId={childId || ''}
       />
 
-      {/* 一括印刷コンテナ */}
-      {printAllData && (
-        <ProfessionalPlanPrintAll
-          draftPlan={printAllData.draftPlan}
-          finalPlan={printAllData.finalPlan}
-          hoursPlan={printAllData.hoursPlan}
-          selectedChild={selectedChild}
-          officeName={officeName}
-        />
-      )}
+      {transferDirection&&<DocumentTransferModal scope={{book:'professional',officeId:selectedOfficeId,month:currentMonth,children:childrenData,childId}} officeName={officeName} direction={transferDirection} beforeTransfer={()=>autoSaver.current!.flushAll()} onImported={async()=>{await fetchAvailableMonths();await fetchData();onReload?.();}} onClose={()=>setTransferDirection(null)} onExcel={transferDirection==='export'?()=>void handleExcelExport():()=>setIsImportOpen(true)}/>}
+      {exportDocuments&&<ProfessionalPlanExportSettings documents={exportDocuments} childName={selectedChild.fullName} month={currentMonth} onClose={()=>setExportDocuments(null)}/>}
+      {printDocuments && <SupportImplementationPrintSettings professionalDocuments={printDocuments} onClose={()=>setPrintDocuments(null)} />}
+
     </div>
   );
 };

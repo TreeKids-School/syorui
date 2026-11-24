@@ -117,9 +117,7 @@ export async function performUndo(action: ImportHistoryAction): Promise<void> {
             updatedAt: new Date().toISOString()
           };
           const prefRef = doc(db, `children/${row.childId}/app_categories/書類管理/tree_communications`, `${action.officeId}_${formattedDate}`);
-          const noPrefRef = doc(db, `children/${row.childId}/app_categories/書類管理/tree_communications`, formattedDate);
           await addBatchOp((b) => b.set(prefRef, treePayload, { merge: true }));
-          await addBatchOp((b) => b.set(noPrefRef, treePayload, { merge: true }));
         }
       }
     }
@@ -129,9 +127,7 @@ export async function performUndo(action: ImportHistoryAction): Promise<void> {
       const meta = action.deletedPlanMeta;
       if (meta.childId && meta.month) {
         const prefDocId = `${action.officeId}_${meta.childId}_${meta.month}`;
-        const noPrefDocId = `${meta.childId}_${meta.month}`;
         await addBatchOp((b) => b.set(doc(db, 'supportPlans', prefDocId), { ...meta, officeId: action.officeId, updatedAt: serverTimestamp() }, { merge: true }));
-        await addBatchOp((b) => b.set(doc(db, 'supportPlans', noPrefDocId), { ...meta, officeId: action.officeId, updatedAt: serverTimestamp() }, { merge: true }));
       }
     }
 
@@ -178,14 +174,9 @@ export async function performUndo(action: ImportHistoryAction): Promise<void> {
   // 4. ツリー通信（tree_communications）の復元（既存の予定があった場合のみ元に戻す。空文字での消去は行わない）
   for (const tree of action.before.treeComms) {
     const prefRef = doc(db, `children/${tree.childId}/app_categories/書類管理/tree_communications`, tree.prefDocId);
-    const noPrefRef = doc(db, `children/${tree.childId}/app_categories/書類管理/tree_communications`, tree.dateKey);
 
     if (tree.hadExisting && tree.futurePlan) {
       await addBatchOp((b) => b.set(prefRef, {
-        future_plan: tree.futurePlan,
-        updatedAt: new Date().toISOString()
-      }, { merge: true }));
-      await addBatchOp((b) => b.set(noPrefRef, {
         future_plan: tree.futurePlan,
         updatedAt: new Date().toISOString()
       }, { merge: true }));
@@ -231,9 +222,7 @@ export async function performRedo(action: ImportHistoryAction): Promise<void> {
       const meta = action.deletedPlanMeta;
       if (meta.childId && meta.month) {
         const prefDocId = `${action.officeId}_${meta.childId}_${meta.month}`;
-        const noPrefDocId = `${meta.childId}_${meta.month}`;
         await addBatchOp((b) => b.delete(doc(db, 'supportPlans', prefDocId)));
-        await addBatchOp((b) => b.delete(doc(db, 'supportPlans', noPrefDocId)));
       }
     }
 
@@ -265,13 +254,8 @@ export async function performRedo(action: ImportHistoryAction): Promise<void> {
   // 3. ツリー通信を再適用
   for (const tree of action.after.treeComms) {
     const prefRef = doc(db, `children/${tree.childId}/app_categories/書類管理/tree_communications`, tree.prefDocId);
-    const noPrefRef = doc(db, `children/${tree.childId}/app_categories/書類管理/tree_communications`, tree.dateKey);
 
     await addBatchOp((b) => b.set(prefRef, {
-      ...tree.payload,
-      updatedAt: new Date().toISOString()
-    }, { merge: true }));
-    await addBatchOp((b) => b.set(noPrefRef, {
       ...tree.payload,
       updatedAt: new Date().toISOString()
     }, { merge: true }));

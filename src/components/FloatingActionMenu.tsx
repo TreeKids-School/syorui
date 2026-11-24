@@ -18,7 +18,7 @@ export const FloatingActionMenu: React.FC<FloatingActionMenuProps> = ({ actions 
   const [isOpen, setIsOpen] = useState(false);
 
   const menu = (
-    <div className="fixed bottom-24 md:bottom-8 right-6 flex flex-col items-end gap-4 z-[9999] print:hidden pointer-events-none">
+    <div className="fixed bottom-[calc(9rem+env(safe-area-inset-bottom))] md:bottom-8 right-6 flex flex-col items-end gap-4 z-[9999] print:hidden pointer-events-none">
       {/* メニューアイテム */}
       <div 
         className={`flex flex-col items-end gap-3 transition-all duration-300 ease-out transform pointer-events-none ${

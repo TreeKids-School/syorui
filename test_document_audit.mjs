@@ -1,0 +1,19 @@
+import assert from 'node:assert/strict';import fs from 'node:fs';import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url),ts=require('typescript');function load(path,imports={}){const exports={};new Function('exports','require',ts.transpileModule(fs.readFileSync(path,'utf8'),{compilerOptions:{module:1,target:9}}).outputText)(exports,id=>imports[id]||require(id));return exports;}
+const model=load('src/lib/documentAuditModel.ts');let serial=0,reads=0;
+const firestore={collection:(_db,...parts)=>({path:parts.join('/')}),doc:(base,id)=>({path:base.path+'/'+(id||'random'+(++serial)),id:id||'random'+serial}),serverTimestamp:()=>'<server-time>',getDoc(){reads++;throw Error('unexpected read');}};
+const audit=load('src/lib/documentAudit.ts',{'firebase/firestore':firestore,'./firebase':{db:{},auth:{currentUser:{uid:'u1',displayName:'fallback'}}},'./documentAuditModel':model});
+audit.setAuditActor('u1','設定の担当者','#123456');audit.setAuditChildren([{id:'child1',fullName:'テスト児童'}]);
+const operations=[],writer={set:(ref,data)=>operations.push({ref,data})};
+const context={officeId:'home',book:'implementation',childId:'child1',month:'2026-11',documentId:'r1'};
+const before={content:{futurePlan:'private before text',resultInfo:'private result'}},after={content:{futurePlan:'private changed text',resultInfo:'private result'}};
+audit.auditDocumentWrite(writer,context,before,after);assert.equal(operations.length,1);const log=operations[0].data;assert.equal(log.actorName,'設定の担当者');assert.equal(log.actorUid,'u1');assert.equal(log.childName,'テスト児童');assert.equal(log.actorColor,'#123456');assert.equal(log.createdAt,'<server-time>');assert.equal(log.changes[0].field,'今後の予定');assert.ok(!JSON.stringify(log).includes('private'));assert.ok(log.scopes.includes(model.auditScope('implementation','child1','')));assert.ok(log.scopes.includes(model.auditScope('implementation','child1','2026-11')));assert.ok(operations[0].ref.path.startsWith('offices/home/document_change_history/'));
+audit.auditDocumentWrite(writer,context,before,structuredClone(before));assert.equal(operations.length,1,'no entry for unchanged save');assert.equal(reads,0,'logging never reads documents or staff');
+assert.ok(model.auditEntryId(2000,'b')<model.auditEntryId(1000,'a'),'newer log keys sort first with the default index');
+assert.equal(model.describeDocumentChanges({updatedAt:'old'},{updatedAt:'new'}).length,0);
+assert.equal(model.describeDocumentChanges({isPrimary:false},{isPrimary:true})[0].field,'メイン指定');assert.equal(model.describeDocumentChanges({archived:false},{archived:true})[0].field,'アーカイブ状態');
+const persisted=[];const batch=()=>{const pending=[];return {set:(ref,data)=>pending.push({ref,data}),commit:async fail=>{if(fail)throw Error('offline');persisted.push(...pending);}};};
+let b=batch();b.set({path:'document'},after);audit.auditDocumentWrite(b,context,before,after);await assert.rejects(()=>b.commit(true));assert.equal(persisted.length,0);b=batch();b.set({path:'document'},after);audit.auditDocumentWrite(b,context,before,after);await b.commit();assert.equal(persisted.length,2);
+const page=fs.readFileSync('src/pages/MonthlySummary.tsx','utf8');assert.ok(page.includes('aria-label="変更ログ"'));assert.ok(page.includes('<DocumentChangeLog'));assert.ok(page.includes('childrenReadKey'));assert.ok(!page.includes('[currentMonth, selectedOfficeId, childrenData, year, month]'));
+const app=fs.readFileSync('src/App.tsx','utf8');assert.ok(!app.includes("getDocsFromServer(query(collection(db, 'professionalPlans')))"));assert.ok(app.includes('getMonitoringPlans(selectedOfficeId)'));
+console.log('PASS: actor identity, all book/child scopes, reverse pagination order, changed-field-only privacy, no-op suppression, no extra reads, atomic log+document write and removed unscoped start-up query');

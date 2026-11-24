@@ -1,4 +1,5 @@
 export interface Child {
+  archived?: boolean;
   id?: string;
   fullName: string;
   nameKana: string;

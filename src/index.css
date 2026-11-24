@@ -248,7 +248,7 @@ html, body {
   }
 
   /* ===================================================
-     専門的支援計画書（横）: body.print-prof
+     個別支援計画書（横）: body.print-prof
      =================================================== */
   body.print-prof * {
     visibility: hidden !important;
@@ -277,7 +277,7 @@ html, body {
   }
 
   /* ===================================================
-     専門的支援計画書 一括印刷（横）: body.print-prof-all
+     個別支援計画書 一括印刷（横）: body.print-prof-all
      =================================================== */
   body.print-prof-all * {
     visibility: hidden !important;
@@ -530,3 +530,43 @@ html, body {
   }
 }
 
+
+/* モーダルは body 直下に配置し、表示中の画面に収める。 */
+.viewport-modal {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  overscroll-behavior: contain;
+}
+.viewport-modal > :not(.absolute) {
+  min-height: 0;
+  max-height: 100% !important;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.viewport-modal > :not(.absolute) {
+  margin-block: 0 !important;
+}
+
+.summary-mobile-header-slot { display: none; }
+@media (max-width: 767px) and (orientation: portrait) {
+  .summary-desktop-header { display: none; }
+  .summary-mobile-header-slot:not(:empty) { display: block; }
+  .summary-mobile-content { padding-bottom: calc(6rem + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 767px) and (orientation: portrait) {
+  body:has(.summary-mobile-header-slot:not(:empty)) .mobile-search-results { bottom: calc(7.5rem + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 767px) and (orientation: portrait) {
+  .document-desktop-header { display: none; }
+  body:has(.mobile-document-header) .mobile-page-content { padding-bottom: calc(8.5rem + env(safe-area-inset-bottom)); }
+  body:has(.mobile-document-header) .mobile-search-results { bottom: calc(10.5rem + env(safe-area-inset-bottom)); }
+}
+
+.mobile-bottom-bar:not(:has(#mobile-summary-header-slot > *)):not(:has(button)) { display: none; }
+
+@media (orientation: landscape) {
+  .mobile-bottom-bar[data-sort="false"] { display: none; }
+}

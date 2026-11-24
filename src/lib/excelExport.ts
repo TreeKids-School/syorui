@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
+import { preserveExistingExcelSheets, verifyAddedExcelSheet } from './preserveExcelSheets';
 
 /**
  * Excelファイルをダウンロードするユーティリティ
@@ -9,28 +10,6 @@ export const downloadExcel = (data: any[], fileName: string, sheetName: string =
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
   XLSX.writeFile(workbook, `${fileName}.xlsx`);
-};
-
-/**
- * 支援目標が実質的に存在するか判定するヘルパー
- */
-const hasValidGoals = (text: string | null | undefined): boolean => {
-  if (!text) return false;
-  
-  const trimmed = text.trim();
-  if (trimmed === '') return false;
-  
-  if (trimmed === '未入力' || trimmed === '未設定') return false;
-  
-  const clean = trimmed
-    .replace(/長期目標：/g, '')
-    .replace(/短期目標：/g, '')
-    .replace(/具体的目標：/g, '')
-    .replace(/[\s\u3000\u200B\u200C\u200D\uFEFF]/g, '');
-    
-  if (clean === '' || clean === '未入力' || clean === '未設定') return false;
-  
-  return true;
 };
 
 /**
@@ -158,6 +137,13 @@ export const sortRowsByDateAsc = (rows: any[], month?: string): any[] => {
   }
 
   return activeRows.sort((a, b) => parseDateToSortKey(a.date, defaultYear) - parseDateToSortKey(b.date, defaultYear));
+};
+
+/** 原本の6枠を超えた記録を、正常終了扱いで切り捨てない。 */
+export const existingExcelRows = (rows: any[], month: string): any[] => {
+  const active = sortRowsByDateAsc(rows, month);
+  if (active.length > 6) throw new Error(`出力対象が${active.length}件あり、原本の6枠に収まりません。採用日を6日以内に調整してください。ファイルは変更していません。`);
+  return active;
 };
 
 /**
@@ -340,9 +326,9 @@ export const exportSupportImplementation = (
 };
 
 /**
- * 既存のエクセルファイルを読み込み、スタイル（罫線・フォント）を完全に維持したまま文字のみを上書きエクスポートする (ブラウザダウンロード版)
+ * 原本から対象月シートを追加し、既存シートを保護したExcelをダウンロードする。
  */
-export const exportToExistingExcel = (
+export const exportToExistingExcel = async (
   file: File,
   childName: string,
   month: string,
@@ -352,123 +338,30 @@ export const exportToExistingExcel = (
   authorName?: string,
   createdAt?: string,
   onLog?: (msg: string) => void
-): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const arrayBuffer = e.target?.result as ArrayBuffer;
-        const workbook = new ExcelJS.Workbook();
-        await workbook.xlsx.load(arrayBuffer);
-        
-        const worksheet = workbook.worksheets[workbook.worksheets.length - 1];
-        if (!worksheet) {
-          throw new Error('エクセルファイル内にシートが見つかりませんでした。');
-        }
-
-        const log = (msg: string) => {
-          console.log(msg);
-          if (onLog) onLog(msg);
-        };
-
-        log(`既存Excelの読み込みに成功しました（スタイル維持モード）。`);
-        log(`書き込み対象シート（一番右）: 「${worksheet.name}」`);
-
-        const writeCell = (address: string, val: any, fontSize?: number) => {
-          const cell = worksheet.getCell(address);
-          const oldVal = cell.value !== null && cell.value !== undefined ? cell.value : '(空)';
-          cell.value = val;
-          if (fontSize !== undefined) {
-            cell.font = { ...cell.font, size: fontSize };
-          }
-          log(`セル ${address} 文字上書き: 「${oldVal}」 ➜ 「${val}」`);
-        };
-
-        // 1. 児童氏名 (I2)
-        writeCell('I2', childName);
-
-        // 2. 支援目標 (A5)
-        if (hasValidGoals(goals)) {
-          writeCell('A5', goals);
-        } else {
-          log(`アプリ側の支援目標が実質的に空欄（値: 「${goals || ''}」）のため、既存Excelの支援目標(A5)の上書きをスキップします。`);
-        }
-
-        // 3. 対象年月 (A10)
-        const warekiMonth = parseToWarekiMonth(month);
-        writeCell('A10', warekiMonth);
-
-        // 4. データ行 (最大6ブロック)
-        const activeRows = sortRowsByDateAsc(rows, month);
-        for (let k = 0; k < 6; k++) {
-          const S = 12 + k * 5;
-          const rowData = activeRows[k];
-          
-          const addrDate = `A${S}`;
-          const addrResult = `E${S}`;
-          const addrFuture = `H${S}`;
-
-          if (rowData) {
-            // 日付（若い順・年なし表記に整形）
-            writeCell(addrDate, formatDisplayDateNoYear(rowData.date) || rowData.date || '');
-            
-            // 療育内容 (B_S 〜 B_{S+4})
-            const contents = sortSupportContents(rowData.content.supportContent);
-            for (let i = 0; i < 5; i++) {
-              const addrContent = `B${S + i}`;
-              const val = contents[i];
-              if (val && val.trim() !== '') {
-                writeCell(addrContent, val);
-              }
-            }
-            
-            // 療育結果
-            const resText = rowData.content.resultInfo || '';
-            writeCell(addrResult, resText, determineFontSize(resText));
-            
-            // 今後の予定
-            const futText = rowData.content.futurePlan || '';
-            writeCell(addrFuture, futText, determineFontSize(futText));
-          } else {
-            // データがないブロックはクリア
-            writeCell(addrDate, '');
-            for (let i = 0; i < 5; i++) {
-              // writeCell(`B${S + i}`, ''); // 療育内容はプルダウン等を残すためクリアしない
-            }
-            writeCell(addrResult, '');
-            writeCell(addrFuture, '');
-          }
-        }
-
-        // 5. フッター (A42)
-        const warekiDate = parseToWarekiDate(createdAt);
-        const footerText = `${warekiDate}作成   作成者：${authorName || ''}`;
-        writeCell('A42', footerText);
-
-        // ファイル書き出しとダウンロード
-        log(`上書きしたExcelデータのバイナリを生成中...`);
-        const buffer = await workbook.xlsx.writeBuffer();
-        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${fileName}.xlsx`;
-        a.click();
-        window.URL.revokeObjectURL(url);
-        log(`ダウンロードが開始されました。`);
-        resolve();
-      } catch (err) {
-        reject(err);
-      }
-    };
-    reader.onerror = (err) => reject(err);
-    reader.readAsArrayBuffer(file);
-  });
+): Promise<{sheetName: string}> => {
+  let output: any;
+  // ダウンロード版も一括出力と同じ原本複製・入力規則・既存シート保護を使う。
+  const result = await cloneTemplateAndWriteExcelFile({
+    getFile: async () => file,
+    createWritable: async () => ({
+      write: async (buffer: any) => {output = buffer;},
+      close: async () => {},
+    }),
+  }, childName, month, goals, rows, authorName, `${parseToWarekiDate(createdAt)}作成`, onLog);
+  if (!output) throw new Error('Excelファイルを生成できませんでした。');
+  const blob = new Blob([output], {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const url = window.URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${fileName}.xlsx`;
+    anchor.click();
+    onLog?.('原本を複製したExcelのダウンロードを開始しました。');
+  } finally {window.URL.revokeObjectURL(url);}
+  return result;
 };
 
-/**
- * File System Access API を使用して、既存のExcelスタイル（罫線・枠線）を100%維持したまま文字のみを上書き保存する
- */
+/** 個人の直接保存も、一括出力と同じ保護付き原本複製を行う。 */
 export const overwriteExistingExcelFile = async (
   fileHandle: any,
   childName: string,
@@ -478,119 +371,9 @@ export const overwriteExistingExcelFile = async (
   authorName?: string,
   createdAt?: string,
   onLog?: (msg: string) => void
-): Promise<void> => {
-  const log = (msg: string) => {
-    console.log(msg);
-    if (onLog) onLog(msg);
-  };
-
-  try {
-    const file = await fileHandle.getFile();
-    log(`既存Excelファイル「${file.name}」の読み込みを開始します...`);
-
-    // タイムスタンプ不整合を防ぐため、直接arrayBuffer()でロード
-    const arrayBuffer = await file.arrayBuffer();
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(arrayBuffer);
-    
-    const worksheet = workbook.worksheets[workbook.worksheets.length - 1];
-    if (!worksheet) {
-      throw new Error('エクセルファイル内にシートが見つかりませんでした。');
-    }
-
-    log(`既存Excelの読み込みに成功しました（スタイル維持モード）。`);
-    log(`書き込み対象シート（一番右）: 「${worksheet.name}」`);
-
-    // セルに安全に値を書き込み、スタイルを維持するヘルパー
-    const writeCell = (address: string, val: any, fontSize?: number) => {
-      const cell = worksheet.getCell(address);
-      const oldVal = cell.value !== null && cell.value !== undefined ? cell.value : '(空)';
-      cell.value = val;
-      if (fontSize !== undefined) {
-        cell.font = { ...cell.font, size: fontSize };
-      }
-      log(`セル ${address} 文字上書き: 「${oldVal}」 ➜ 「${val}」`);
-    };
-
-    // 1. 児童氏名 (I2)
-    writeCell('I2', childName);
-
-    // 2. 支援目標 (A5)
-    if (hasValidGoals(goals)) {
-      writeCell('A5', goals);
-    } else {
-      log(`アプリ側の支援目標が実質的に空欄（値: 「${goals || ''}」）のため、既存Excelの支援目標(A5)の上書きをスキップします。`);
-    }
-
-    // 3. 対象年月 (A10)
-    const warekiMonth = parseToWarekiMonth(month);
-    writeCell('A10', warekiMonth);
-
-    // 4. データ行 (最大6ブロック)
-    const activeRows = sortRowsByDateAsc(rows, month);
-    for (let k = 0; k < 6; k++) {
-      const S = 12 + k * 5;
-      const rowData = activeRows[k];
-      
-      const addrDate = `A${S}`;
-      const addrResult = `E${S}`;
-      const addrFuture = `H${S}`;
-
-      if (rowData) {
-        // 日付（若い順・年なし表記に整形）
-        writeCell(addrDate, formatDisplayDateNoYear(rowData.date) || rowData.date || '');
-        
-        // 療育内容 (B_S 〜 B_{S+4})
-        const contents = sortSupportContents(rowData.content.supportContent);
-        for (let i = 0; i < 5; i++) {
-          const addrContent = `B${S + i}`;
-          const val = contents[i];
-          if (val && val.trim() !== '') {
-            writeCell(addrContent, val);
-          }
-        }
-        
-        // 療育結果
-        const resText = rowData.content.resultInfo || '';
-        writeCell(addrResult, resText, determineFontSize(resText));
-        
-        // 今後の予定
-        const futText = rowData.content.futurePlan || '';
-        writeCell(addrFuture, futText, determineFontSize(futText));
-      } else {
-        // データがないブロックはクリア
-        writeCell(addrDate, '');
-        for (let i = 0; i < 5; i++) {
-          // writeCell(`B${S + i}`, ''); // 療育内容はプルダウン等を残すためクリアしない
-        }
-        writeCell(addrResult, '');
-        writeCell(addrFuture, '');
-      }
-    }
-
-    // 5. フッター (A42)
-    const warekiDate = parseToWarekiDate(createdAt);
-    const footerText = `${warekiDate}作成   作成者：${authorName || ''}`;
-    writeCell('A42', footerText);
-
-    log(`上書き保存用のバイナリを生成中...`);
-    const buffer = await workbook.xlsx.writeBuffer();
-
-    log(`元のエクセルファイル「${file.name}」へ直接上書き保存を実行します...`);
-    
-    // Writableを取得して即時書き込み
-    const writable = await fileHandle.createWritable();
-    await writable.write(buffer);
-    await writable.close();
-    
-    log(`上書き保存が正常に完了しました！`);
-  } catch (err: any) {
-    log(`エラーが発生しました: ${err.message || err}`);
-    if (err.message && err.message.includes('state cached')) {
-      log(`【警告】他アプリでエクセルファイルが開かれているか、タイムスタンプが変更されました。一度エクセルアプリを閉じてから、再度「既存Excelに直接上書き」をクリックしてください。`);
-    }
-    throw err;
-  }
+): Promise<{sheetName: string}> => {
+  return cloneTemplateAndWriteExcelFile(fileHandle, childName, month, goals, rows,
+    authorName, `${parseToWarekiDate(createdAt)}作成`, onLog, true);
 };
 
 /**
@@ -633,7 +416,8 @@ export const cloneTemplateAndWriteExcelFile = async (
   rows: any[],
   authorName?: string,
   createdDateText?: string,
-  onLog?: (msg: string) => void
+  onLog?: (msg: string) => void,
+  verifySavedFile = false
 ): Promise<{ sheetName: string }> => {
   const log = (msg: string) => {
     console.log(msg);
@@ -649,12 +433,9 @@ export const cloneTemplateAndWriteExcelFile = async (
     await workbook.xlsx.load(arrayBuffer);
 
     // 1. 原本シートの特定
-    let templateWs = workbook.worksheets.find(ws => ws.name.replace(/[\s　]+/g, '') === '原本');
+    const templateWs = workbook.worksheets.find(ws => ws.name.replace(/[\s　]+/g, '') === '原本');
     if (!templateWs) {
-      templateWs = workbook.worksheets.find(ws => ws.name.includes('原本')) || workbook.worksheets[0];
-    }
-    if (!templateWs) {
-      throw new Error(`ファイル「${file.name}」内に原本シートが見つかりませんでした。`);
+      throw new Error(`ファイル「${file.name}」内に「原本」シートが見つかりません。保存を中止しました。`);
     }
     log(`テンプレート元シート: 「${templateWs.name}」`);
 
@@ -682,11 +463,11 @@ export const cloneTemplateAndWriteExcelFile = async (
     log(`新規作成シート名: 「${targetSheetName}」`);
 
     // 3. 原本シートを末尾に完全複製（クローン）
-    // セルごとの大きさ・列幅・行高・外枠縦線・印刷ページ設定（A4幅維持）を100%忠実に継承
+    // セルごとの大きさ・列幅・行高・外枠縦線・印刷ページ設定を100%忠実に継承
     const newWs = workbook.addWorksheet(targetSheetName);
 
     // 1) 列設定・列幅の完全複製 (最大列数まで全列確実にコピー)
-    const maxCol = Math.max(templateWs.columnCount || 0, templateWs.actualColumnCount || 0, 30);
+    const maxCol = Math.max(templateWs.columnCount || 0, templateWs.actualColumnCount || 0, 9);
     for (let c = 1; c <= maxCol; c++) {
       const tCol = templateWs.getColumn(c);
       const nCol = newWs.getColumn(c);
@@ -700,22 +481,26 @@ export const cloneTemplateAndWriteExcelFile = async (
       }
     }
 
-    // 2) ページ設定・印刷設定・ビューの完全複製（A4サイズ・1ページ幅収容・余白などを100%維持）
+    // 2) ページ設定・印刷設定・ビューの複製（用紙・倍率・ページ数・余白は原本に従う）
     if (templateWs.pageSetup) {
       newWs.pageSetup = JSON.parse(JSON.stringify(templateWs.pageSetup));
     }
     if (templateWs.views) {
       newWs.views = JSON.parse(JSON.stringify(templateWs.views));
     }
+    newWs.views = newWs.views.length ? newWs.views.map(view => ({...view, tabSelected: true})) : [{state: 'normal', tabSelected: true}];
     if (templateWs.properties) {
       newWs.properties = JSON.parse(JSON.stringify(templateWs.properties));
     }
     if (templateWs.headerFooter) {
       newWs.headerFooter = JSON.parse(JSON.stringify(templateWs.headerFooter));
     }
+    // 値・書式とは別管理の入力規則も複製する。空欄や範囲指定のプルダウンも対象。
+    const templateValidations = (templateWs as any).dataValidations.model;
+    (newWs as any).dataValidations.model = structuredClone(templateValidations);
 
     // 3) 行高・セル値・セルスタイル（フォント・罫線・塗りつぶし・配置）の完全複製
-    const maxRow = Math.max(templateWs.rowCount || 0, templateWs.actualRowCount || 0, 50);
+    const maxRow = Math.max(templateWs.rowCount || 0, templateWs.actualRowCount || 0, 42);
     for (let r = 1; r <= maxRow; r++) {
       const tRow = templateWs.getRow(r);
       const nRow = newWs.getRow(r);
@@ -752,7 +537,7 @@ export const cloneTemplateAndWriteExcelFile = async (
       });
     }
 
-    log(`「原本」シートの完全複製（列幅・行高・罫線・A4印刷設定・結合）が完了しました。`);
+    log(`「原本」シートの完全複製（列幅・行高・罫線・原本の印刷設定・結合）が完了しました。`);
 
     // 4. 新シートに今月のデータを流し込み（セルサイズ・装飾はそのまま、中身のみ設定）
     const writeCell = (address: string, val: any, fontSize?: number) => {
@@ -773,7 +558,7 @@ export const cloneTemplateAndWriteExcelFile = async (
     writeCell('A10', warekiMonth);
 
     // データ行 (最大6ブロック)
-    const activeRows = sortRowsByDateAsc(rows, month);
+    const activeRows = existingExcelRows(rows, month);
     for (let k = 0; k < 6; k++) {
       const S = 12 + k * 5;
       const rowData = activeRows[k];
@@ -784,7 +569,7 @@ export const cloneTemplateAndWriteExcelFile = async (
 
       if (rowData) {
         // 日にち欄は年は不要（例: 8月12日）
-        writeCell(addrDate, formatDisplayDateNoYear(rowData.date));
+        writeCell(addrDate, formatDisplayDateNoYear(rowData.date), 12);
         const contents = sortSupportContents(rowData.content.supportContent);
         for (let i = 0; i < 5; i++) {
           const val = contents[i];
@@ -821,10 +606,17 @@ export const cloneTemplateAndWriteExcelFile = async (
     log(`シート「${targetSheetName}」へデータを流し込みました。保存処理を実行します...`);
 
     // 5. 保存
-    const buffer = await workbook.xlsx.writeBuffer();
+    const generatedBuffer = await workbook.xlsx.writeBuffer();
+    const buffer = await preserveExistingExcelSheets(arrayBuffer, generatedBuffer as ArrayBuffer, targetSheetName, templateWs.name);
+    await verifyAddedExcelSheet(arrayBuffer, buffer, targetSheetName);
     const writable = await fileHandle.createWritable();
     await writable.write(buffer);
     await writable.close();
+    if (verifySavedFile || fileHandle.kind === 'file') {
+      const saved = await fileHandle.getFile();
+      await verifyAddedExcelSheet(arrayBuffer, await saved.arrayBuffer(), targetSheetName);
+      log(`保存先の新規シート「${targetSheetName}」と既存シートの保護を再確認しました。`);
+    }
 
     log(`エクセルファイル「${file.name}」への書き込み・保存が正常に完了しました！`);
     return { sheetName: targetSheetName };
@@ -835,7 +627,7 @@ export const cloneTemplateAndWriteExcelFile = async (
 };
 
 /**
- * 専門的支援計画のエクスポート用データ作成
+ * 個別支援計画書のエクスポート用データ作成
  */
 export const exportProfessionalPlan = (
   childName: string,

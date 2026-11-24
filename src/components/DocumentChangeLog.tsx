@@ -1,0 +1,42 @@
+import {readAuditPage} from '../lib/auditRead';
+import {useEffect,useRef,useState} from 'react';
+import type {DocumentData,QueryDocumentSnapshot} from 'firebase/firestore';
+import {Clock,X} from 'lucide-react';
+import {ViewportModal} from './ViewportModal';
+import {DropdownSelect} from './ui/DropdownSelect';
+import {DocumentIcon} from './DocumentIcon';
+import {auditScope} from '../lib/documentAuditModel';
+import {readDiagnostics} from '../lib/readDiagnostics';
+import {describeReadError} from '../lib/readError';
+import type {Child} from '../data/mockData';
+
+type Entry={id:string;documentType?:string;book:'professional'|'implementation'|'force';childId:string;childName?:string;month:string;label:string;operation:string;actorName:string;actorColor:string;createdAt:any;changes:{field:string;action:string;date?:string}[]};
+const labels={professional:'個別支援計画書',implementation:'専門的支援実施計画',force:'強行シート'};
+export function DocumentChangeLog({officeId,childrenData,onClose}:{officeId:string;childrenData:Child[];onClose:()=>void}){
+  const [book,setBook]=useState(''),[child,setChild]=useState(''),[search,setSearch]=useState(''),[sort,setSort]=useState('newest');
+  const [entries,setEntries]=useState<Entry[]>([]),[loading,setLoading]=useState(false),[error,setError]=useState(''),[more,setMore]=useState(false),[diagnostic,setDiagnostic]=useState(false),[metrics,setMetrics]=useState(readDiagnostics);
+  const sequence=useRef(0),cursor=useRef<QueryDocumentSnapshot<DocumentData>|null>(null),scope=auditScope(book,child,'');
+  const load=async(after:QueryDocumentSnapshot<DocumentData>|null,ticket:number)=>{
+    setLoading(true);setError('');
+    try{
+      const snapshot=await readAuditPage(officeId,scope,after);
+      if(ticket!==sequence.current)return;
+      const next=snapshot.docs.map(item=>({id:item.id,...item.data()} as Entry));setEntries(previous=>after?[...previous,...next]:next);cursor.current=snapshot.docs.at(-1)||null;setMore(snapshot.size===50);
+    }catch(error){if(ticket===sequence.current)setError(describeReadError(error));}finally{if(ticket===sequence.current)setLoading(false);}
+  };
+  useEffect(()=>{const ticket=++sequence.current;cursor.current=null;setEntries([]);setMore(false);void load(null,ticket);return()=>{sequence.current++;};},[officeId,scope]);
+  const names=new Map(childrenData.map(child=>[child.id!,child.fullName]));
+  const time=(value:any)=>value?.toDate?.()||new Date(value||0);
+  const sorted=entries.slice().sort((a,b)=>sort==='child'?(names.get(a.childId)||a.childName||'').localeCompare(names.get(b.childId)||b.childName||'','ja'):sort==='actor'?a.actorName.localeCompare(b.actorName,'ja'):(time(a.createdAt).getTime()-time(b.createdAt).getTime())*(sort==='oldest'?1:-1));
+  const availableChildren=[...new Map([...childrenData,...entries.filter(entry=>entry.childId&&entry.childName&&!names.has(entry.childId)).map(entry=>({id:entry.childId,fullName:entry.childName!,nameKana:'',archived:true}))].map(child=>[child.id,child])).values()];
+  const options=availableChildren.filter(item=>item.id&&(item.id===child||!search||[item.fullName,item.nameKana].some(value=>(value||'').normalize('NFKC').includes(search.normalize('NFKC'))))).slice().sort((a,b)=>(a.nameKana||a.fullName).localeCompare(b.nameKana||b.fullName,'ja'));
+  return <ViewportModal className="fixed inset-0 z-[10020] flex items-center justify-center bg-slate-900/60 p-3 print:hidden" onKeyDown={event=>{if(event.key==='Escape'&&!document.querySelector('[role=menu]'))onClose();}}><section role="dialog" aria-modal="true" aria-labelledby="document-log-title" className="flex h-[90dvh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
+    <header className="flex shrink-0 items-center justify-between border-b bg-slate-50 px-5 py-4"><h2 id="document-log-title" className="flex items-center gap-2 font-bold"><Clock size={19}/>変更ログ</h2><button type="button" aria-label="変更ログを閉じる" onClick={onClose} className="min-h-10 rounded-xl p-2 text-slate-500 hover:bg-slate-100"><X size={20}/></button></header>
+    <div className="flex shrink-0 flex-wrap gap-2 border-b p-3"><button type="button" onClick={()=>setDiagnostic(false)} className={'min-h-10 rounded-xl px-3 text-sm '+(!diagnostic?'bg-primary/10 font-semibold text-primary':'text-slate-500')}>変更履歴</button><button type="button" onClick={()=>{setMetrics(readDiagnostics());setDiagnostic(true);}} className={'min-h-10 rounded-xl px-3 text-sm '+(diagnostic?'bg-primary/10 font-semibold text-primary':'text-slate-500')}>読み取り診断</button></div>
+    {diagnostic?<div className="overflow-auto p-5"><p className="mb-4 text-sm text-slate-600">このブラウザタブで計測した取得数の目安です。Firebaseの請求件数とは異なり、他端末や未計測の処理は含みません。</p><table className="w-full text-left text-sm"><thead className="bg-slate-50"><tr>{['処理','要求回数','取得数の目安','再利用','失敗'].map(label=><th key={label} className="p-3">{label}</th>)}</tr></thead><tbody>{metrics.map(metric=><tr key={metric.label} className="border-t"><td className="p-3">{metric.label}</td><td className="p-3">{metric.requests}</td><td className="p-3">{metric.documents}</td><td className="p-3">{metric.reused}</td><td className="p-3">{metric.failures}</td></tr>)}</tbody></table><button type="button" onClick={()=>setMetrics(readDiagnostics())} className="mt-4 min-h-10 rounded-xl border px-4 text-sm">表示を更新</button></div>:<>
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b p-3"><DropdownSelect label="書類" value={book} options={[{value:'',label:'すべての書類'},...Object.entries(labels).map(([value,label])=>({value,label,icon:<DocumentIcon type={value as Entry['book']}/>}))]} onChange={setBook}/><input type="search" aria-label="児童の候補を検索" value={search} onChange={event=>setSearch(event.target.value)} placeholder="児童を検索" className="min-h-10 min-w-0 rounded-xl border px-3 text-sm"/><DropdownSelect label="児童" value={child} options={[{value:'',label:'すべての児童'},...options.map(item=>({value:item.id!,label:item.fullName+(item.archived?'（アーカイブ）':'')}))]} onChange={setChild}/><DropdownSelect label="表示中の並べ替え" value={sort} options={[{value:'newest',label:'新しい順（表示中）'},{value:'oldest',label:'古い順（表示中）'},{value:'child',label:'児童名順（表示中）'},{value:'actor',label:'変更者順（表示中）'}]} onChange={setSort}/></div>
+      <div className="min-h-0 flex-1 overflow-auto p-4">{error&&<p role="alert" className="mb-3 text-sm text-rose-600">{error}<button type="button" onClick={()=>void load(cursor.current,sequence.current)} className="ml-3 underline">再試行</button></p>}<table className="w-full text-left text-sm"><thead className="sticky top-0 bg-slate-50"><tr>{['日時','変更者','児童・書類','変更内容'].map(label=><th key={label} className="px-3 py-2">{label}</th>)}</tr></thead><tbody>{sorted.map(entry=><tr key={entry.id} className="border-t align-top"><td className="whitespace-nowrap p-3 text-xs">{entry.createdAt?new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(time(entry.createdAt)):'時刻確定中'}</td><td className="p-3"><span className="mr-2 inline-block h-3 w-3 rounded-full" style={{backgroundColor:entry.actorColor||'#64748b'}}/>{entry.actorName}</td><td className="p-3"><div>{entry.childId?names.get(entry.childId)||entry.childName||entry.childId:'事業所共通'}</div><div className="mt-1 flex items-center gap-2 text-xs text-slate-500"><DocumentIcon type={entry.book}/>{labels[entry.book]} {entry.month} {entry.label}</div></td><td className="space-y-1 p-3"><div className="font-semibold">{entry.operation}</div>{entry.changes.map((change,index)=><div key={index} className="text-xs text-slate-600">{change.date?change.date+'・':''}{change.field}（{change.action}）</div>)}</td></tr>)}</tbody></table>{loading&&<p role="status" className="py-6 text-center text-sm text-slate-500">読み込み中…</p>}{!loading&&!entries.length&&!error&&<p className="py-8 text-center text-sm text-slate-500">追加後の変更からログが記録されます。条件に合うログはありません。</p>}{more&&!loading&&<button type="button" onClick={()=>void load(cursor.current,sequence.current)} className="mt-4 min-h-10 w-full rounded-xl border text-sm">さらに50件表示</button>}</div>
+    </>}
+    <footer className="flex shrink-0 justify-between border-t bg-slate-50 px-5 py-3"><span className="text-xs text-slate-500">変更履歴は必要時に50件ずつ取得します。</span><button type="button" onClick={onClose} className="min-h-10 rounded-xl border bg-white px-4 text-sm">閉じる</button></footer>
+  </section></ViewportModal>;
+}

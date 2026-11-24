@@ -1,6 +1,7 @@
+import {DocumentIcon} from '../components/DocumentIcon';
 import React from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { FileText, BrainCircuit, ShieldAlert, ArrowLeft, User, School, Star } from 'lucide-react';
+import { ShieldAlert, ArrowLeft, User, School, Star, ChevronRight } from 'lucide-react';
 import type { Child } from '../data/mockData';
 
 type ChildDashboardProps = {
@@ -22,10 +23,7 @@ type DocCard = {
 };
 
 export const ChildDashboard: React.FC<ChildDashboardProps> = ({ 
-  childrenData,
-  selectedOfficeId,
-  onOfficeChange,
-  offices
+  childrenData
 }) => {
   const { childId } = useParams<{ childId: string }>();
   const navigate = useNavigate();
@@ -47,9 +45,9 @@ export const ChildDashboard: React.FC<ChildDashboardProps> = ({
   const docCards: DocCard[] = [
     {
       id: 'professional-perspective',
-      title: '専門的支援計画書',
-      description: '児童の発達段階や支援方針を専門的な視点から記録します。中長期の支援計画の基磤となる文書です。',
-      icon: <BrainCircuit size={28} />,
+      title: '個別支援計画書',
+      description: '支援の目標・方針を作成します。',
+      icon: <DocumentIcon type="professional" size={20} tone="inherit"/>,
       path: `/children/${childId}/professional-perspective`,
       available: true,
       color: 'from-violet-500 to-purple-600',
@@ -58,8 +56,8 @@ export const ChildDashboard: React.FC<ChildDashboardProps> = ({
     {
       id: 'support-plan',
       title: '専門的支援実施計画',
-      description: '月次の支援目標・実施内容・結果・今後の計画を記録します。ツリー通信との連携機能あり。',
-      icon: <FileText size={28} />,
+      description: '月ごとの支援内容・結果・今後の予定を記録します。',
+      icon: <DocumentIcon type="implementation" size={20} tone="inherit"/>,
       path: `/children/${childId}/support-plan/${currentMonth}`,
       available: true,
       color: 'from-emerald-500 to-teal-600',
@@ -68,8 +66,8 @@ export const ChildDashboard: React.FC<ChildDashboardProps> = ({
     {
       id: 'force-sheet',
       title: '強行シート',
-      description: '特定の支援方針や注意事項、緊急時対応など重点事項をまとめます。',
-      icon: <ShieldAlert size={28} />,
+      description: '重点的な支援や対応方法をまとめます。',
+      icon: <DocumentIcon type="force" size={20} tone="inherit"/>,
       path: `/children/${childId}/force-sheet`,
       available: true,
       color: 'from-orange-500 to-red-500',
@@ -79,7 +77,7 @@ export const ChildDashboard: React.FC<ChildDashboardProps> = ({
   const initials = selectedChild.imageKey || (selectedChild.fullName ? selectedChild.fullName[0] : '?');
 
   return (
-    <div className="max-w-4xl mx-auto flex flex-col gap-10 animate-fade-in pb-20">
+    <div className="max-w-3xl mx-auto flex flex-col gap-4 animate-fade-in">
       {/* 戻るボタン */}
       <button
         onClick={() => navigate('/')}
@@ -89,21 +87,21 @@ export const ChildDashboard: React.FC<ChildDashboardProps> = ({
       </button>
 
       {/* 児童プロフィールカード */}
-      <div className="glass-panel p-8 flex items-center gap-8">
-        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-primary to-teal-500 text-white flex items-center justify-center text-3xl font-bold shadow-lg shadow-primary/30 flex-shrink-0">
+      <div className="glass-panel p-4 flex items-center gap-3">
+        <div className="w-12 h-12 rounded-full bg-gradient-to-br from-primary to-teal-500 text-white flex items-center justify-center text-xl font-bold shadow-lg shadow-primary/30 flex-shrink-0">
           {initials}
         </div>
-        <div className="flex-1">
-          <div className="flex items-baseline gap-3 mb-1">
-            <h2 className="text-3xl font-black text-slate-800">{selectedChild.fullName}</h2>
-            <span className="text-slate-400 text-base font-medium">{selectedChild.nameKana}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <h2 className="text-lg font-bold text-slate-800">{selectedChild.fullName}</h2>
+            <span className="text-slate-400 text-xs font-medium">{selectedChild.nameKana}</span>
           </div>
-          <div className="flex items-center gap-6 text-slate-500 text-sm mt-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-500 text-xs mt-1">
             <span className="flex items-center gap-1.5"><School size={14} className="text-primary" />{selectedChild.schoolName}</span>
             <span className="flex items-center gap-1.5"><User size={14} className="text-primary" />{selectedChild.grade}</span>
           </div>
           {(selectedChild.features ?? []).length > 0 && (
-            <div className="flex gap-1.5 flex-wrap mt-4">
+            <div className="flex gap-1 flex-wrap mt-2">
               {(selectedChild.features ?? []).map((f: string) => (
                 <span key={f} className="flex items-center gap-1 px-2.5 py-1 bg-primary/10 text-primary rounded-full text-[12px] font-semibold">
                   <Star size={10} fill="currentColor" />{f}
@@ -114,59 +112,12 @@ export const ChildDashboard: React.FC<ChildDashboardProps> = ({
         </div>
       </div>
 
-      {/* 事業所切り替えメニュー (複数事業所所属の児童のみ表示) */}
-      {(() => {
-        const getOfficeTag = (officeId: string): string => {
-          if (officeId === 'LNrWc8f6G703aUYRZ5e2') return 'サーチ';
-          if (officeId === 'nWioUcWXUskreYjmSL8p') return 'ホーム';
-          return '';
-        };
-
-        const childOfficeTags = Array.isArray(selectedChild.offices)
-          ? selectedChild.offices
-          : typeof selectedChild.offices === 'string'
-            ? [selectedChild.offices]
-            : [];
-
-        if (childOfficeTags.length <= 1) return null;
-
-        return (
-          <div className="glass-panel p-4 bg-slate-50 border border-slate-100 flex flex-col md:flex-row items-center justify-between gap-4 -mt-6">
-            <div className="text-sm font-bold text-slate-600 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-              この児童は複数の事業所（サーチ・ホーム）に登録されています。表示する事業所を選択してください：
-            </div>
-            <div className="flex bg-slate-200/60 p-1 rounded-xl gap-1 shrink-0">
-              {offices
-                .filter(o => childOfficeTags.includes(getOfficeTag(o.id)))
-                .map(office => {
-                  const isActive = selectedOfficeId === office.id;
-                  const displayName = getOfficeTag(office.id);
-                  return (
-                    <button
-                      key={office.id}
-                      onClick={() => onOfficeChange(office.id)}
-                      className={`px-4 py-2 text-xs font-bold rounded-lg transition-all ${
-                        isActive
-                          ? 'bg-white text-slate-800 shadow-sm'
-                          : 'text-slate-500 hover:text-slate-700'
-                      }`}
-                    >
-                      {displayName}
-                    </button>
-                  );
-                })}
-            </div>
-          </div>
-        );
-      })()}
-
       {/* 書類選択グリッド */}
       <div>
-        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-5 pl-1">
+        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 pl-1">
           書類を選択してください
         </h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 gap-2.5">
           {docCards.map(card => (
             <DocCardItem key={card.id} card={card} />
           ))}
@@ -179,44 +130,17 @@ export const ChildDashboard: React.FC<ChildDashboardProps> = ({
 // ---- 書類カードコンポーネント ----
 function DocCardItem({ card }: { card: DocCard }) {
   const content = (
-    <div
-      className={`relative group glass-panel p-7 flex flex-col gap-5 transition-all duration-300 ${
-        card.available
-          ? 'cursor-pointer hover:shadow-xl hover:-translate-y-1'
-          : 'opacity-75 cursor-default'
-      }`}
-    >
-      {/* 開発中バッジ */}
-      {!card.available && (
-        <span className="absolute top-4 right-4 px-2.5 py-0.5 bg-amber-100 text-amber-700 text-[10px] font-bold rounded-full uppercase tracking-wider">
-          開発中
-        </span>
-      )}
-      
-      {/* アラートバッジ */}
-      {card.available && card.alertMessage && (
-        <span className="absolute top-4 right-4 flex items-center gap-1 px-2.5 py-1 bg-red-100 text-red-600 text-[10px] font-bold rounded-full shadow-sm">
-          <ShieldAlert size={12} /> {card.alertMessage}
-        </span>
-      )}
-
-      {/* アイコン */}
-      <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${card.color} text-white flex items-center justify-center shadow-lg transition-transform duration-300 group-hover:scale-110`}>
+    <div className={`group glass-panel flex items-center gap-3 p-3.5 transition-colors ${card.available ? 'cursor-pointer hover:bg-slate-50' : 'opacity-75'}`}>
+      <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${card.color} text-white shadow-sm`}>
         {card.icon}
       </div>
-
-      {/* テキスト */}
-      <div className="flex flex-col gap-2">
-        <h4 className="text-base font-bold text-slate-800 leading-snug">{card.title}</h4>
-        <p className="text-sm text-slate-500 leading-relaxed">{card.description}</p>
+      <div className="min-w-0 flex-1">
+        <h4 className="text-sm font-bold leading-snug text-slate-800">{card.title}</h4>
+        <p className="mt-1 text-xs leading-relaxed text-slate-500">{card.description}</p>
+        {card.alertMessage && <p className="mt-1 flex items-center gap-1 text-[10px] font-semibold text-red-600"><ShieldAlert size={12} />{card.alertMessage}</p>}
+        {!card.available && <span className="text-[10px] text-amber-700">開発中</span>}
       </div>
-
-      {/* 矢印インジケーター */}
-      {card.available && (
-        <div className="mt-auto pt-2 flex items-center gap-1 text-primary text-sm font-semibold opacity-0 group-hover:opacity-100 transition-opacity">
-          開く →
-        </div>
-      )}
+      {card.available && <ChevronRight size={18} aria-hidden="true" className="shrink-0 text-slate-400 group-hover:text-primary" />}
     </div>
   );
 

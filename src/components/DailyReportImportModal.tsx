@@ -1,3 +1,4 @@
+import {ViewportModal} from './ViewportModal';
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { 
   X, FileSpreadsheet, AlertCircle, Check, Upload, 
@@ -12,6 +13,8 @@ import { db } from '../lib/firebase';
 import type { Child } from '../data/mockData';
 import { parseGoalsText, formatStructuredGoals } from '../lib/utils';
 import type { ImportHistoryAction } from '../lib/importHistory';
+import {excelExportOfficePriority} from '../lib/excelExportOfficeScope';
+import {getMonthlyTreeCommunications} from '../lib/monthlyTreeCommunications';
 
 // ---- 型定義 ----
 
@@ -896,13 +899,15 @@ export const DailyReportImportModal: React.FC<DailyReportImportModalProps> = ({
       for (const group of updatedGroups) {
         if (!group.childId) continue;
         const targetOffice = group.officeId || officeToUse;
+        const child = childrenData.find(child => child.id === group.childId);
+        if (!targetOffice || !child) throw new Error('対象事業所と児童を選択してください。');
 
         // 1. 既存の支援目標 (supportPlans)
         try {
           let loadedGoals = '';
           if (targetOffice) {
             const planPrefDoc = await getDoc(doc(db, 'supportPlans', `${targetOffice}_${group.childId}_${group.planMonth}`));
-            if (planPrefDoc.exists()) {
+            if (planPrefDoc.exists() && excelExportOfficePriority(planPrefDoc.data(), planPrefDoc.id, child, targetOffice, group.planMonth)) {
               loadedGoals = planPrefDoc.data().goals || '';
             }
           }
@@ -910,9 +915,9 @@ export const DailyReportImportModal: React.FC<DailyReportImportModalProps> = ({
             const planSnap = await getDocs(
               query(collection(db, 'supportPlans'), where('childId', '==', group.childId), where('month', '==', group.planMonth))
             );
-            if (!planSnap.empty) {
-              loadedGoals = planSnap.docs[0].data().goals || '';
-            }
+            const matchingPlan = planSnap.docs.filter(d => excelExportOfficePriority(d.data(), d.id, child, targetOffice, group.planMonth))
+              .sort((a, b) => excelExportOfficePriority(b.data(), b.id, child, targetOffice, group.planMonth) - excelExportOfficePriority(a.data(), a.id, child, targetOffice, group.planMonth))[0];
+            if (matchingPlan) loadedGoals = matchingPlan.data().goals || '';
           }
           group.existingGoals = loadedGoals;
         } catch (e) {
@@ -934,6 +939,7 @@ export const DailyReportImportModal: React.FC<DailyReportImportModalProps> = ({
 
           dailySnap.forEach(d => {
             const data = d.data();
+            if (!excelExportOfficePriority(data, d.id, child, targetOffice, group.planMonth)) return;
             const dStr = data.date;
             if (dStr) {
               existingDateMap[dStr] = { id: d.id, content: data.content || {}, rawData: data };
@@ -944,10 +950,10 @@ export const DailyReportImportModal: React.FC<DailyReportImportModalProps> = ({
           let treeCommMap: Record<string, string> = {};
           let treeFutureMap: Record<string, string> = {};
           try {
-            const treeCommRef = collection(db, 'children', group.childId, 'app_categories', '書類管理', 'tree_communications');
-            const treeSnap = await getDocs(treeCommRef);
+            const treeSnap = await getMonthlyTreeCommunications(group.childId, targetOffice, group.planMonth);
             treeSnap.forEach(td => {
               const tData = td.data();
+              if (!excelExportOfficePriority(tData, td.id, child, targetOffice, group.planMonth)) return;
               const parts = td.id.split('_');
               const dKey = parts.length === 2 ? parts[1] : td.id;
               if (tData.tree_comm_text) {
@@ -1324,8 +1330,6 @@ export const DailyReportImportModal: React.FC<DailyReportImportModalProps> = ({
             childTreeDoc.tree_comm_text = finalExternalInfo;
           }
 
-          const childTreeRefNoPref = doc(db, `children/${group.childId}/app_categories/書類管理/tree_communications`, rec.formattedDate);
-          await addBatchOp((b) => b.set(childTreeRefNoPref, childTreeDoc, { merge: true }));
           if (effectiveOfficeId) {
             const childTreeRefPref = doc(db, `children/${group.childId}/app_categories/書類管理/tree_communications`, `${effectiveOfficeId}_${rec.formattedDate}`);
             await addBatchOp((b) => b.set(childTreeRefPref, childTreeDoc, { merge: true }));
@@ -1375,7 +1379,7 @@ export const DailyReportImportModal: React.FC<DailyReportImportModalProps> = ({
   const totalSelectedCount = groups.reduce((acc, g) => acc + g.records.filter(r => r.selected).length, 0);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+    <ViewportModal className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       {/* オーバーレイ */}
       <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={handleClose} />
 
@@ -2469,6 +2473,6 @@ export const DailyReportImportModal: React.FC<DailyReportImportModalProps> = ({
         </div>
 
       </div>
-    </div>
+    </ViewportModal>
   );
 };

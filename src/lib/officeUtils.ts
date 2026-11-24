@@ -60,3 +60,19 @@ export const matchesOffice = (officeId: string, tagsOrOffices: any): boolean => 
     return normalizeOfficeString(item) === normalizeOfficeString(officeId);
   });
 };
+
+/** 所属の別名・IDの重複を一本化する。事業所でない一般タグは所属に混ぜない。 */
+export function resolveChildOffices(data: Record<string, any>): string[] {
+  const list = (value: any): any[] => Array.isArray(value) ? value : value ? [value] : [];
+  const membership = [...list(data.offices), ...list(data.office), ...list(data.officeId)];
+  const tags = [...list(data.tags), ...list(data.officeTags)].filter(value => isSearchOffice(value) || isHomeOffice(value));
+  const resolved = new Set<string>();
+  for (const value of [...membership, ...tags]) {
+    const search = isSearchOffice(value), home = isHomeOffice(value);
+    if (search) resolved.add(OFFICE_IDS.SEARCH);
+    if (home) resolved.add(OFFICE_IDS.HOME);
+    if (!search && !home && typeof value === 'string' && value.trim()) resolved.add(value.trim());
+  }
+  // 事業所未設定の児童をサーチへ表示する、既存の初期所属ルールと合わせる。
+  return resolved.size ? [...resolved] : [OFFICE_IDS.SEARCH];
+}

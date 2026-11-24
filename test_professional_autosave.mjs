@@ -1,0 +1,19 @@
+import assert from 'node:assert/strict';import fs from 'node:fs';import vm from 'node:vm';import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url),ts=require('typescript');
+const timers=new Map();let timerId=0;
+function load(path){const exports={};vm.runInNewContext(ts.transpileModule(fs.readFileSync(path,'utf8'),{compilerOptions:{module:1,target:9}}).outputText,{exports,setTimeout:callback=>{timers.set(++timerId,callback);return timerId;},clearTimeout:id=>timers.delete(id)});return exports;}
+const {createDocumentAutoSaver}=load('src/lib/documentAutoSave.ts');
+let writes=[],statuses=[],fail=false,block;
+const saver=createDocumentAutoSaver(async value=>{writes.push({...value});if(block)await block;if(fail)throw Error('offline');},(key,status)=>statuses.push([key,status]));
+saver.loaded('home-final',{text:'loaded'});await saver.flush('home-final');assert.equal(writes.length,0,'reading does not write');
+saver.schedule('home-final',{text:'a'});saver.schedule('home-final',{text:'ab'});saver.schedule('home-final',{text:'abc'});assert.equal(writes.length,0);assert.equal(timers.size,1,'debounced');await saver.flush('home-final');assert.equal(writes.length,1);assert.equal(writes[0].text,'abc');
+let release;block=new Promise(resolve=>release=resolve);saver.schedule('home-final',{text:'older'});const first=saver.flush('home-final');await new Promise(setImmediate);saver.schedule('home-final',{text:'newest'});const last=saver.flush('home-final');release();await Promise.all([first,last]);block=null;assert.equal(writes.at(-1).text,'newest','new edits win over in-flight save');
+saver.loaded('search-hours',{text:'hours'});saver.schedule('home-final',{text:'home'});saver.schedule('search-hours',{text:'search'});await saver.flushAll();assert.ok(writes.some(w=>w.text==='home'));assert.ok(writes.some(w=>w.text==='search'));
+fail=true;saver.schedule('home-final',{text:'keep-on-failure'});await assert.rejects(saver.flush('home-final'));assert.equal(statuses.at(-1)[1],'error');fail=false;await saver.flush('home-final');assert.equal(writes.at(-1).text,'keep-on-failure');assert.equal(statuses.at(-1)[1],'saved');
+// Reverting to the old baseline while another value is being saved must still persist the revert.
+saver.loaded('revert',{text:'original'});block=new Promise(resolve=>release=resolve);saver.schedule('revert',{text:'changed'});const changing=saver.flush('revert');await new Promise(setImmediate);saver.schedule('revert',{text:'original'});const reverting=saver.flush('revert');release();await Promise.all([changing,reverting]);block=null;assert.equal(writes.at(-1).text,'original');
+const {professionalPlanDraft}=load('src/lib/professionalPlanDraft.ts');const draft=professionalPlanDraft({id:'old-id',childId:'old-child',startMonth:'2026-06',updatedAt:{seconds:1},longTermGoal:'goal'},'child','home','2026-06','draft');assert.equal(draft.id,'child_2026-06_draft_home');assert.equal(draft.data.childId,'child');assert.equal(draft.data.status,'draft');assert.ok(!('updatedAt'in draft.data));assert.ok(!('id'in draft.data));
+const page=fs.readFileSync('src/pages/ProfessionalPerspective.tsx','utf8');assert.ok(!page.includes('window.prompt'));assert.ok(page.includes('対象月を追加'));assert.ok(!page.includes('handleSave'));assert.ok(!page.includes('title="行を削除"'));assert.ok(page.includes('if(!valid())return;'));assert.ok(page.includes('void handlePrintAll()'));
+console.log('PASS: no write on load, debounced latest edits, serialized saving, independent scopes, failure retry, revert during save, scoped document IDs, month modal and print chooser');
+
+const history=[];const audited=createDocumentAutoSaver(async(value,previous)=>history.push({value,previous}),()=>{});audited.loaded('audit',{text:'before'});audited.schedule('audit',{text:'after'});await audited.flush('audit');assert.equal(history[0].previous.text,'before');assert.equal(history[0].value.text,'after');

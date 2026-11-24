@@ -63,7 +63,7 @@ const sanitizeData = (data: any, options: SanitizeOptions) => {
   return clean;
 };
 
-export const BackupRestore: React.FC = () => {
+export const BackupRestore: React.FC<{ onDataChange?: () => void }> = ({ onDataChange }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [log, setLog] = useState<string>('');
@@ -176,6 +176,7 @@ export const BackupRestore: React.FC = () => {
     }
     
     setIsImporting(false);
+    onDataChange?.();
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 

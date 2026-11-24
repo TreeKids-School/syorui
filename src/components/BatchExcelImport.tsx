@@ -1,17 +1,26 @@
+import {measureReads} from '../lib/readDiagnostics';
+import {appendDocumentAudit} from '../lib/documentAudit';
+import {ViewportModal} from './ViewportModal';
+import { SettingsFeature, SettingsGroup, settingsRowClass } from './SettingsGroup';
 import React, { useState, useMemo, useRef } from 'react';
-import { createPortal } from 'react-dom';
 import { 
   FolderOpen, FileSpreadsheet, CheckCircle2, AlertCircle, 
-  Loader2, Check, X, ArrowDownToLine, Calendar, Info
+  Loader2, Check, X, Info
 } from 'lucide-react';
-import { collection, query, where, getDocs, doc, getDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs as firestoregetDocs, doc, getDoc as firestoregetDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
+const getDocs=measureReads('Excel一括インポート',firestoregetDocs);
+const getDoc=measureReads('Excel一括インポート',firestoregetDoc);
+
 import { db, auth } from '../lib/firebase';
 import type { Child } from '../data/mockData';
 import * as XLSX from 'xlsx';
+import {excelExportOfficePriority} from '../lib/excelExportOfficeScope';
 
 interface BatchExcelImportProps {
   selectedMonth: string; // "YYYY-MM"
+  selectedOfficeId: string;
   childrenData: Child[];
+  onDataChange?: () => void;
 }
 
 interface ParsedRecord {
@@ -37,7 +46,9 @@ interface ScannedImportItem {
 
 export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
   selectedMonth: initialMonth,
-  childrenData
+  selectedOfficeId,
+  childrenData,
+  onDataChange
 }) => {
   const [targetMonth, setTargetMonth] = useState<string>(initialMonth || new Date().toISOString().slice(0, 7));
   const [isScanning, setIsScanning] = useState<boolean>(false);
@@ -554,6 +565,7 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
 
   // 一括インポート（Firestoreへ保存）
   const handleExecuteBatchImport = async () => {
+    if (!selectedOfficeId) { alert('対象の事業所を選択してください。'); return; }
     const targets = scannedItems.filter(item => item.selected && item.matchedChildId && item.records.length > 0);
     if (targets.length === 0) {
       alert('インポート対象として選択されたファイルがありません。');
@@ -570,14 +582,13 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
 
     try {
       let staffName = 'スタッフ';
-      let staffOfficeId = '';
+      const staffOfficeId = selectedOfficeId;
       if (auth.currentUser) {
         try {
           const staffSnap = await getDoc(doc(db, 'staff', auth.currentUser.uid));
           if (staffSnap.exists()) {
             const sd = staffSnap.data();
             staffName = sd.fullName || sd.name || 'スタッフ';
-            staffOfficeId = sd.officeId || '';
           }
         } catch (e) {
           console.warn('Staff fetch error:', e);
@@ -617,7 +628,8 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
             officeId: staffOfficeId || '',
             updatedAt: serverTimestamp()
           }, { merge: true });
-          batchOpCount++;
+          appendDocumentAudit(currentBatch,{officeId:staffOfficeId,book:'implementation',childId,month:targetMonth,operation:'Excelインポート'},[{field:'支援目標',action:'変更'}]);
+          batchOpCount+=2;
           await commitBatchIfNeeded();
         }
 
@@ -632,6 +644,8 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
           const snap = await getDocs(q);
           snap.forEach(d => {
             const data = d.data();
+            const child = childrenData.find(child => child.id === childId);
+            if (!child || !excelExportOfficePriority(data, d.id, child, staffOfficeId, targetMonth)) return;
             if (data.date) {
               existingMap.set(data.date, {
                 id: d.id,
@@ -640,9 +654,7 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
               });
             }
           });
-        } catch (e) {
-          console.warn(`Failed to fetch existing reports for ${childId}:`, e);
-        }
+        } catch (e) { throw new Error(`「${item.matchedChildName}」の対象事業所の記録を確認できませんでした。`); }
 
         // 3. 各日報レコードの登録
         for (const rec of item.records) {
@@ -682,7 +694,8 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
             dailyPayload.createdAt = serverTimestamp();
             currentBatch.set(newRef, dailyPayload);
           }
-          batchOpCount++;
+          appendDocumentAudit(currentBatch,{officeId:staffOfficeId,book:'implementation',childId,month:targetMonth,operation:'Excelインポート'},[{date:rec.formattedDate,field:'療育内容・結果・今後の予定',action:existing?'変更':'追加'}]);
+          batchOpCount+=2;
           await commitBatchIfNeeded();
 
           // tree_communications への反映（今後の予定を反映、ツリー通信本文は消去せず保護）
@@ -700,11 +713,6 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
             if (finalExternalInfo) {
               childTreeDoc.tree_comm_text = finalExternalInfo;
             }
-
-            const treeRefNoPref = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, rec.formattedDate);
-            currentBatch.set(treeRefNoPref, childTreeDoc, { merge: true });
-            batchOpCount++;
-            await commitBatchIfNeeded();
 
             if (staffOfficeId) {
               const treeRefPref = doc(db, `children/${childId}/app_categories/書類管理/tree_communications`, `${staffOfficeId}_${rec.formattedDate}`);
@@ -736,6 +744,8 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
       const msg = err.message || String(err);
       setLogs(prev => [...prev, `❌ インポートエラー: ${msg}`]);
       alert(`インポート中にエラーが発生しました: ${msg}`);
+    } finally {
+      onDataChange?.();
     }
   };
 
@@ -746,7 +756,7 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
   , [scannedItems]);
 
   return (
-    <div className="p-8 flex flex-col gap-6">
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
       {/* 隠し input (フォルダ選択フォールバック用) */}
       <input
         type="file"
@@ -759,80 +769,18 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
         className="hidden"
       />
 
-      {/* 説明カード */}
-      <div className="bg-gradient-to-r from-emerald-500/10 via-teal-500/10 to-transparent border border-emerald-200/80 rounded-3xl p-6 shadow-xs">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-emerald-600/20">
-            <ArrowDownToLine size={24} />
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center gap-3">
-              <h2 className="text-xl font-black text-slate-800 tracking-tight">
-                月別エクセル一括インポート（フォルダ指定）
-              </h2>
-              <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold">
-                Excel ➜ アプリ一括登録
-              </span>
-            </div>
-            <p className="text-sm text-slate-600 leading-relaxed">
-              児童のエクセルが入ったフォルダを1回指定するだけで、フォルダ内の全児童のエクセルを自動照合し、
-              指定した月（例: <span className="font-mono font-bold bg-emerald-100/70 text-emerald-900 px-1.5 py-0.5 rounded">{targetMonth}</span>）のシートのみを一括抽出してアプリ（Firestore）へ高速インポートします。
-            </p>
-            <div className="flex flex-wrap items-center gap-4 text-xs font-semibold text-emerald-800 pt-1">
-              <span>✔ 指定月のシート（例: {targetMonth.replace('-', '')} や {parseInt(targetMonth.split('-')[1] || '1', 10)}月）のみを高速自動抽出</span>
-              <span>✔ 児童名・ふりがなを自動照合（表記揺れ対応）</span>
-              <span>✔ 大容量データも250件ずつの安全分割コミット（上限エラー完全防止）</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 条件指定とアクション */}
-      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-6">
-        <div className="flex flex-wrap items-center gap-6 w-full sm:w-auto">
-          {/* 月選択 */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-bold text-slate-500 block flex items-center gap-1.5">
-              <Calendar size={14} className="text-emerald-600" />
-              取り込み対象年月
-            </label>
-            <input
-              type="month"
-              value={targetMonth}
-              onChange={(e) => setTargetMonth(e.target.value)}
-              className="bg-slate-50 border border-slate-300 rounded-xl px-4 py-2.5 text-base font-bold text-slate-800 focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all cursor-pointer"
-            />
-          </div>
-
-          {/* 抽出対象シート名目安 */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-bold text-slate-500 block">抽出するシート名の目安</label>
-            <div className="px-4 py-2.5 rounded-xl bg-slate-100 border border-slate-200 text-sm font-mono font-bold text-slate-700">
-              {targetMonth.replace('-', '')} / {parseInt(targetMonth.split('-')[1] || '1', 10)}月
-            </div>
-          </div>
-        </div>
-
-        {/* フォルダ選択ボタン */}
-        <button
-          type="button"
-          onClick={handleSelectFolder}
-          disabled={isScanning}
-          className="w-full sm:w-auto flex items-center justify-center gap-2.5 px-7 py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-sm rounded-xl shadow-lg shadow-emerald-600/25 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
-        >
-          {isScanning ? (
-            <>
-              <Loader2 size={20} className="animate-spin" />
-              <span>フォルダを高速解析中... ({scanProgress.current}/{scanProgress.total})</span>
-            </>
-          ) : (
-            <>
-              <FolderOpen size={20} />
-              <span>📁 フォルダを選択してその月だけ一括インポート</span>
-            </>
-          )}
-        </button>
-      </div>
+      <SettingsFeature title="Excel一括インポート" direction="Excel → アプリ"
+        description="児童のExcelファイルが入ったフォルダを選び、対象月のデータをアプリに取り込みます。"
+        details={['児童名・ふりがなを使って、対象の児童を照合します。', '対象月のシートを読み込みます。', '読み込んだ内容を確認し、取り込む児童を選んでから登録します。']} />
+      <SettingsGroup title="対象と設定">
+        <label className={settingsRowClass}><span>対象年月</span><input type="month" value={targetMonth} onChange={e => setTargetMonth(e.target.value)} className="min-w-0 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" /></label>
+        <div className={settingsRowClass}><span>読み込むシート名の目安</span><span className="text-right text-slate-500">{targetMonth.replace('-', '')} / {parseInt(targetMonth.split('-')[1] || '1', 10)}月</span></div>
+      </SettingsGroup>
+      <SettingsGroup title="ファイルの選択">
+        <div className="px-4 py-4"><button type="button" onClick={handleSelectFolder} disabled={isScanning} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">
+          {isScanning ? <><Loader2 size={18} className="animate-spin" /><span>フォルダを確認中… ({scanProgress.current}/{scanProgress.total})</span></> : <><FolderOpen size={18} /><span>フォルダを選択して内容を確認</span></>}
+        </button></div>
+      </SettingsGroup>
 
       {/* スキャン中のプログレスバー表示 */}
       {isScanning && (
@@ -855,8 +803,7 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
       )}
 
       {/* 照合確認モーダル（createPortal で最前面マウント） */}
-      {isModalOpen && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 animate-fade-in">
+      {isModalOpen && <ViewportModal className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 animate-fade-in">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[88vh] flex flex-col overflow-hidden border border-slate-100">
             
             {/* モーダルヘッダー */}
@@ -1134,9 +1081,7 @@ export const BatchExcelImport: React.FC<BatchExcelImportProps> = ({
               </button>
             </div>
           </div>
-        </div>,
-        document.body
-      )}
+        </ViewportModal>}
     </div>
   );
 };

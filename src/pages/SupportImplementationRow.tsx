@@ -1,13 +1,12 @@
 import React, { useRef, useEffect } from 'react';
 import { 
-  Archive, 
+  Archive, Trash2, 
   ArchiveRestore, 
   RefreshCw,
   Check, 
   Pencil,
   ExternalLink,
-  ClipboardPaste,
-  Trash2
+  ClipboardPaste
 } from 'lucide-react';
 import type { DailyReport } from '../types/supportPlan';
 
@@ -21,8 +20,8 @@ const SUPPORT_CONTENT_OPTIONS = [
 
 export const SupportImplementationRow = React.memo(({ 
   row, idx, isNewsletterCollapsed, isEditingDate, onEditDate, onFinishEditDate,
-  updateRowDate, toggleSupportContent, updateRowContent, handleSyncFromNewsletter, archiveRow, newsletters,
-  isSelectionMode, isSelected, onToggleSelect, isRecentlyImported, onDeleteRow
+  updateRowDate, toggleSupportContent, updateRowContent, handleSyncFromNewsletter, archiveRow, onDeleteRow, newsletters,
+  isSelectionMode, isSelected, onToggleSelect, isRecentlyImported
 }: {
   row: DailyReport;
   idx: number;
@@ -35,13 +34,13 @@ export const SupportImplementationRow = React.memo(({
   updateRowContent: (idx: number, field: keyof DailyReport['content'], val: any) => void;
   handleSyncFromNewsletter: (idx: number, dateStr: string) => void;
   archiveRow: (idx: number) => void;
+  onDeleteRow: (idx: number) => void;
   newsletters: Record<string, string>;
   isSelectionMode?: boolean;
   isSelected?: boolean;
   onToggleSelect?: () => void;
   onSingleAiConvert: (idx: number) => void;
   isRecentlyImported?: boolean;
-  onDeleteRow: (idx: number) => void;
 }) => {
   const resultRef = useRef<HTMLTextAreaElement>(null);
   const futureRef = useRef<HTMLTextAreaElement>(null);
@@ -119,6 +118,8 @@ export const SupportImplementationRow = React.memo(({
       style={{ touchAction: 'pan-y' }}
     >
       
+      <button type="button" onClick={()=>onDeleteRow(idx)} aria-label={`${row.date}の行を削除`} className="absolute right-3 top-3 rounded-lg p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600 md:hidden print:hidden"><Trash2 size={16}/></button>
+
       {/* 選択チェックボックス */}
       {isSelectionMode && (
         <div className="p-0 md:p-4 border-r border-slate-300 w-full md:w-[50px] flex items-center justify-center md:table-cell print:hidden bg-primary/5">
@@ -133,13 +134,6 @@ export const SupportImplementationRow = React.memo(({
 
       {/* モバイル用アクションボタン */}
       <div className="absolute top-4 right-4 md:hidden print:hidden z-10 flex items-center gap-2">
-        <button 
-          onClick={() => onDeleteRow(idx)} 
-          className="text-slate-400 hover:text-red-500 p-2 bg-white rounded-full shadow-sm border border-slate-100 transition-colors"
-          title="この日の専門的支援記録を削除"
-        >
-          <Trash2 size={18} />
-        </button>
         <button onClick={() => archiveRow(idx)} className="text-slate-400 p-2 bg-white rounded-full shadow-sm border border-slate-100">
           {row.archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}
         </button>
@@ -374,14 +368,8 @@ export const SupportImplementationRow = React.memo(({
       {/* PC用アクション列（削除 & アーカイブ / モバイル・印刷時は非表示） */}
       <div className={`hidden md:table-cell p-1 md:p-2 text-center z-10 border-l border-slate-300 print:hidden ${row.archived ? 'bg-slate-50' : 'bg-white'} w-[70px] md:w-[80px]`}>
         <div className="flex items-center justify-center gap-1">
-          <button
-            onClick={() => onDeleteRow(idx)}
-            className="text-slate-400 hover:text-red-500 hover:bg-red-50 p-1.5 rounded-lg transition-colors active:scale-90"
-            title="この日の専門的支援記録を削除"
-          >
-            <Trash2 size={16} />
-          </button>
-          <button
+          <button type="button" onClick={()=>onDeleteRow(idx)} aria-label={`${row.date}の行を削除`} title="行を削除" className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600"><Trash2 size={16}/></button>
+            <button
             onClick={() => archiveRow(idx)}
             className="text-slate-400 hover:text-primary hover:bg-slate-100 p-1.5 rounded-lg transition-colors active:scale-90"
             title={row.archived ? '元に戻す' : 'アーカイブ'}

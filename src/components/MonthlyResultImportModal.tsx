@@ -1,5 +1,7 @@
+import {ViewportModal} from './ViewportModal';
+import {ResultWorkflowTools} from './ResultWorkflowTools';
 import React, { useState, useEffect } from 'react';
-import { X, Clipboard, Check, AlertTriangle, FileText, Sparkles, User, Calendar } from 'lucide-react';
+import { X, AlertTriangle, Sparkles, User, Calendar } from 'lucide-react';
 import type { Child } from '../data/mockData';
 
 interface MonthlyResultImportModalProps {
@@ -8,6 +10,7 @@ interface MonthlyResultImportModalProps {
   monthStr: string; // "YYYY-MM"
   childrenData: Child[];
   existingReports: Record<string, Record<string, any>>; // 既存データ: { childId: { date: report } }
+  onGetSource:()=>string|Promise<string>;
   onImport: (results: Record<string, Record<string, string>>) => Promise<void>;
 }
 
@@ -83,13 +86,12 @@ export const MonthlyResultImportModal: React.FC<MonthlyResultImportModalProps> =
   monthStr,
   childrenData,
   existingReports,
+  onGetSource,
   onImport
 }) => {
   const [inputText, setInputText] = useState('');
   const [previewGroups, setPreviewGroups] = useState<PreviewGroup[]>([]);
   const [overwriteMap, setOverwriteMap] = useState<Record<string, Record<string, boolean>>>({});
-  const [isCopied, setIsCopied] = useState(false);
-  const [showInstruction, setShowInstruction] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
 
   useEffect(() => {
@@ -97,7 +99,6 @@ export const MonthlyResultImportModal: React.FC<MonthlyResultImportModalProps> =
       setInputText('');
       setPreviewGroups([]);
       setOverwriteMap({});
-      setIsCopied(false);
       setIsImporting(false);
     }
   }, [isOpen]);
@@ -153,86 +154,6 @@ export const MonthlyResultImportModal: React.FC<MonthlyResultImportModalProps> =
   const [year, month] = monthStr.split('-');
   const formattedMonth = `${year}年${parseInt(month, 10)}月`;
 
-  const customInstruction = `あなたは児童発達支援および放課後等デイサービスの療育職員です。
-提供された複数児童それぞれのひと月分のツリー通信（日付・児童ID・連絡帳の文章）をもとに、専門的支援実施計画における「療育を行った結果」の文章を作成してください。
-
-個人情報の観点から児童名は匿名化された一時ID（ID: xxx）で表記されています。このID情報は結果の紐付けに必要であるため、出力時にも絶対に変更せずそのまま残してください。
-
-━━━━━━━━━━━━━━━━━━━━
-【「療育を行った結果」の作成ルール】
-━━━━━━━━━━━━━━━━━━━━
-
-1. 【文量と文章構成（130〜140字にするための必須構成）】
-文字数が短く終わらないよう、各児童・各日付について必ず以下の「3つの要素」をすべて含めて130〜140字程度に肉付けして記述してください。
-①【導入】：どのような活動や課題に取り組んだか（場面）
-②【展開】：本人の具体的な様子・手の動かし方・工夫・職員の促しに対する反応
-③【結び】：どのような達成や前向きな姿・気持ちの切り替えが見られたか
-
-2. 【文末表現とトーン】
-- 客観的な書類文とし、文末は「〜した」「〜が見られた」で統一してください。
-- 話し言葉・敬体は禁止: 「〜ました」「〜です」などの敬体や話し言葉は使わず、常体で統一してください。
-
-3. 【呼称と個人情報のルール】
-- 児童の個人名（苗字・名前）は一切出力に含めないでください。
-- 主語は「児童」「職員」「他児」などの一般的な名詞を使用してください。
-- 【重要】「スタッフ」という言葉は使わず、必ず「職員」に統一してください。（例: ×スタッフの声かけ ➜ ○職員の声かけ）
-
-4. 【言語・表現のガイドライン（平易化ルールの徹底）】
-「専門的＝難しい言葉」ではなく、「事実を正確かつ平易に書くこと」を定義とし、硬い言葉や専門用語の乱用を避けてください。
-
-■ 専門用語・熟語の置換（広く一般的に使われる言葉を使用）:
-  × 執行機能・身体操作能力を発揮 → ○ 体の使い方が上手、力加減の調整ができた
-  × 正解を導出・解を導く → ○ 正解を出せた、正しい答えを選べた
-  × 課題を完遂・完遂した → ○ 最後まで取り組んだ、やり遂げた
-  × 〇〇を呈した・〇〇が見受取れた → ○ 〇〇する場面があった、〇〇が見られた
-  × 巧緻性を要する → ○ 手先（足先）の細かな動きが必要な
-
-■ 文章構成とトーン:
-  - 一文を長くしすぎない。
-  - 「〜であり、〜した」という重い接続を避け、「〜して、〜した」「〜した。また、〜だった」と区切って読みやすくする。
-  - 漢字を多用しすぎず、適度にひらがなを混ぜて視覚的な圧迫感を減らす。
-
-■ 「できたこと」へのフォーカス:
-  - 「向上した」「改善した」といった主観的な評価よりも、「〜ができていた」「〜しようとする姿勢があった」という事実ベースの肯定的な記述を優先する。
-
-5. 【禁止事項】
-- 【重要】文章の末尾に「（135字）」「（126字）」のような文字数カウント表記は絶対に付けないこと。
-- 余計な挨拶文、前置き、解説（「作成しました」等）は一切出力しないでください。
-
-━━━━━━━━━━━━━━━━━━━━
-【良い仕上がり例（約135文字の見本）】
-━━━━━━━━━━━━━━━━━━━━
-計算ドリルでは小数の筆算に取り組み、位のずれに自分で気づいて消しゴムで丁寧に直す姿が見られた。職員からの励ましに笑顔を見せ、最後まで集中して問題を解ききることができた。その後の夏祭りの振り返りでも、楽しかった場面の理由をハキハキと発表し、友だちの意見にも関心を示した。
-
-━━━━━━━━━━━━━━━━━━━━
-【ワンクリックコピー対応の出力形式】
-━━━━━━━━━━━━━━━━━━━━
-チャット画面で1クリックで全体をコピーできるよう、出力全体を必ず1つのコードブロック（\`\`\`）で囲んで出力してください。
-
-【出力フォーマット】
-\`\`\`
-【対象月】${formattedMonth}
-
-■ 児童 (ID: [児童ID1])
-- 9月1日: 上記の3要素を含めた130〜140字程度の文章。末尾の文字数カウント表記は不要
-- 9月5日: 上記の3要素を含めた130〜140字程度の文章。末尾の文字数カウント表記は不要
-
-■ 児童 (ID: [児童ID2])
-- 9月2日: 上記の3要素を含めた130〜140字程度の文章。末尾の文字数カウント表記は不要
-\`\`\``;
-
-  const handleCopyInstruction = () => {
-    navigator.clipboard.writeText(customInstruction)
-      .then(() => {
-        setIsCopied(true);
-        setTimeout(() => setIsCopied(false), 2000);
-      })
-      .catch(err => {
-        console.error('Failed to copy text: ', err);
-        alert('コピーに失敗しました。');
-      });
-  };
-
   const handleExecuteImport = async () => {
     if (previewGroups.length === 0) return;
     setIsImporting(true);
@@ -275,7 +196,7 @@ export const MonthlyResultImportModal: React.FC<MonthlyResultImportModalProps> =
   const hasLengthError = previewGroups.some(g => g.items.some(item => item.resultText.length > 140));
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 print:hidden animate-fade-in">
+    <ViewportModal className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 print:hidden animate-fade-in">
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-100 max-w-5xl w-full flex flex-col max-h-[90vh] overflow-hidden animate-scale-up">
         {/* ヘッダー */}
         <div className="bg-slate-50 border-b border-slate-200/60 px-6 py-4 flex items-center justify-between shrink-0">
@@ -290,64 +211,7 @@ export const MonthlyResultImportModal: React.FC<MonthlyResultImportModalProps> =
 
         {/* コンテンツ */}
         <div className="p-6 overflow-y-auto flex-1 space-y-6">
-          {/* 個人情報非表示に関する注意 */}
-          <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-xl p-4 flex gap-3 text-xs leading-relaxed">
-            <AlertTriangle size={18} className="text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <p className="font-bold">⚠️ 個人情報の取り扱いについて</p>
-              <p className="mt-1">
-                本機能では児童の実名を使用せず、コピー時に自動割り当てされた匿名ID（ID: xxx）情報を用いて一括登録を実行します。
-                AIが出力したID表記（`■ 児童 (ID: xxxxx)`）は変更せずにそのまま貼り付けてください。
-              </p>
-            </div>
-          </div>
-
-          {/* カスタム指示セクション */}
-          <div className="border border-slate-200 rounded-xl overflow-hidden">
-            <div 
-              onClick={() => setShowInstruction(!showInstruction)}
-              className="bg-slate-50/50 px-4 py-3 flex items-center justify-between border-b border-slate-200/60 cursor-pointer hover:bg-slate-50"
-            >
-              <span className="text-sm font-bold text-slate-700 flex items-center gap-2">
-                <FileText size={16} className="text-slate-500" />
-                1. Gemini用カスタム指示（複数児童用プロンプト）のコピー
-              </span>
-              <span className="text-xs text-primary font-bold">{showInstruction ? '閉じる' : '展開する'}</span>
-            </div>
-            
-            {showInstruction && (
-              <div className="p-4 bg-slate-50/30 space-y-3">
-                <p className="text-xs text-slate-500">
-                  複数児童のツリー通信を一括コピーしたのち、Geminiに以下の指示プロンプトを設定することで、本アプリが解析可能なフォーマットで全員分の療育結果を生成させることができます。
-                </p>
-                <div className="relative">
-                  <pre className="text-[11px] font-mono bg-slate-900 text-slate-200 p-4 rounded-lg overflow-x-auto max-h-[380px] overflow-y-auto whitespace-pre-wrap leading-relaxed">
-                    {customInstruction}
-                  </pre>
-                  <button
-                    onClick={handleCopyInstruction}
-                    className={`absolute top-2 right-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all shadow-sm border ${
-                      isCopied 
-                        ? 'bg-emerald-600 border-emerald-600 text-white' 
-                        : 'bg-white border-slate-300 hover:bg-slate-50 text-slate-700'
-                    }`}
-                  >
-                    {isCopied ? (
-                      <>
-                        <Check size={12} />
-                        <span>コピー完了！</span>
-                      </>
-                    ) : (
-                      <>
-                        <Clipboard size={12} />
-                        <span>指示をコピー</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+          <ResultWorkflowTools key={monthStr+String(isOpen)} month={monthStr} multiple onGetSource={onGetSource}/>
 
           {/* 入力とプレビューの2列レイアウト */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-[300px]">
@@ -359,7 +223,7 @@ export const MonthlyResultImportModal: React.FC<MonthlyResultImportModalProps> =
               <textarea
                 value={inputText}
                 onChange={e => setInputText(e.target.value)}
-                placeholder={`例：\n【対象月】${formattedMonth}\n\n■ 児童 (ID: child_001)\n- 8月1日: 落ち着いて活動に取り組むことができました。\n- 8月3日: 他児と譲り合って遊具を使うことができました。\n\n■ 児童 (ID: child_002)\n- 8月2日: 職員の声かけに対して元気よく返事をすることができました。`}
+
                 className="flex-1 w-full p-4 border border-slate-300 rounded-xl outline-none resize-none font-mono text-sm focus:border-primary focus:ring-1 focus:ring-primary min-h-[250px] lg:min-h-0"
               />
             </div>
@@ -423,11 +287,7 @@ export const MonthlyResultImportModal: React.FC<MonthlyResultImportModalProps> =
               )}
 
               <div className="flex-1 border border-slate-200 rounded-xl bg-slate-50/50 p-4 overflow-y-auto max-h-[350px] lg:max-h-none min-h-[250px] lg:min-h-0">
-                {previewGroups.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-slate-400 text-xs italic">
-                    左側にテキストを貼り付けると、ここにプレビューが表示されます。
-                  </div>
-                ) : (
+                {previewGroups.length === 0 ? null : (
                   <div className="space-y-4 animate-fade-in">
                     {previewGroups.map((group, groupIdx) => (
                       <div key={groupIdx} className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs space-y-2">
@@ -564,6 +424,6 @@ export const MonthlyResultImportModal: React.FC<MonthlyResultImportModalProps> =
           </button>
         </div>
       </div>
-    </div>
+    </ViewportModal>
   );
 };
