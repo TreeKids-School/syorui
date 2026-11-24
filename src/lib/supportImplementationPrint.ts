@@ -8,7 +8,7 @@ export type SupportPrintRow = {
 export type SupportPrintDocument = {
   childName: string; officeName: string; month: string; goals: string; creator: string; createdDate: string;
 };
-export type SupportPrintSettings = {goalHeight: number; fonts: Record<string, number>; selectedCell: string; selectedCells?: string[];professionalSignDates?:{draft:boolean;final:boolean}};
+export type SupportPrintSettings = {goalHeight: number; fonts: Record<string, number>; selectedCell: string; selectedCells?: string[];previewSelectedRows?:string[];professionalSignDates?:{draft:boolean;final:boolean}};
 export const PRINT_FIELDS = ['date', 'supportContent', 'resultInfo', 'futurePlan'] as const;
 export const PRINT_LABELS = {date: '日付', supportContent: '療育内容', resultInfo: '療育を行った結果', futurePlan: '今後の予定'};
 export const SUPPORT_PRINT_PAGE = {width: 210, height: 297, margin: 8, contentWidth: 194, contentHeight: 280} as const;
@@ -57,7 +57,8 @@ export function supportPrintHtml(document: SupportPrintDocument, rows: SupportPr
   const cell = (key: string, text: string, extra = '') => `<div class="print-cell ${extra} ${interactive && (settings.selectedCells || [settings.selectedCell]).includes(key) ? 'selected' : ''}" data-cell="${escape(key)}" ${interactive ? 'tabindex="0" role="button"' : ''}><div class="cell-text" style="font-size:${cellFontSize(settings.fonts, key)}pt">${escape(text)}</div></div>`;
   const slots = Array.from({length: 6}, (_, index) => {
     const row = rows[index];
-    return `<div class="day-row">${PRINT_FIELDS.map(field => row ? cell(`${row.key}:${field}`, field === 'date' ? row.date.replace(/^\d+月/, '') : row[field], field === 'date' ? 'date-cell' : '') : '<div class="print-cell blank"></div>').join('')}</div>`;
+    const check=interactive&&settings.previewSelectedRows&&row?`<label class="row-print-toggle" title="${escape(row.date)}を印刷"><input type="checkbox" data-print-row="${escape(row.key)}" aria-label="${escape(row.date)}を印刷" ${settings.previewSelectedRows.includes(row.key)?'checked':''}/></label>`:'';
+    return `<div class="day-row${row&&settings.previewSelectedRows&&!settings.previewSelectedRows.includes(row.key)?' day-excluded':''}">${PRINT_FIELDS.map(field => row ? cell(`${row.key}:${field}`, field === 'date' ? row.date.replace(/^\d+月/, '') : row[field], field === 'date' ? 'date-cell' : '') : '<div class="print-cell blank"></div>').join('')}${check}</div>`;
   }).join('');
   return `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>専門的支援実施計画</title><style>
     @page {size:A4 portrait;margin:${SUPPORT_PRINT_PAGE.margin}mm;}
@@ -83,8 +84,9 @@ export function supportPrintHtml(document: SupportPrintDocument, rows: SupportPr
     .day-row>:last-child,.table-heading>:last-child {border-right:0;}
     footer {font-size:9pt;line-height:1.7;overflow:hidden;}
     .guardian {text-align:right;}
-    @media screen { [role=button] {cursor:pointer;} .selected {background:#eff6ff;box-shadow:inset 0 0 0 2px #2563eb;} .overflowing {outline:2px dashed #ea580c;outline-offset:-2px;} }
+    @media screen { .records{overflow:visible;} .day-row{position:relative;} .row-print-toggle{position:absolute;right:-7mm;top:0;bottom:0;width:6mm;display:flex;align-items:center;justify-content:center;} .row-print-toggle input{width:4mm;height:4mm;accent-color:#059669;cursor:pointer;} .day-excluded>.print-cell{opacity:.35;} [role=button] {cursor:pointer;} .selected {background:#eff6ff;box-shadow:inset 0 0 0 2px #2563eb;} .overflowing {outline:2px dashed #ea580c;outline-offset:-2px;} }
     @media print {
+      .row-print-toggle{display:none;}
       html,body {width:${SUPPORT_PRINT_PAGE.contentWidth}mm;height:${SUPPORT_PRINT_PAGE.contentHeight}mm;}
       #paper {width:100%;max-width:${SUPPORT_PRINT_PAGE.contentWidth}mm;height:${SUPPORT_PRINT_PAGE.contentHeight}mm;padding:0;break-inside:avoid;}
     }
@@ -92,7 +94,7 @@ export function supportPrintHtml(document: SupportPrintDocument, rows: SupportPr
     <header><h1>専門的支援実施計画</h1><div class="office">${escape(document.officeName)}</div><div class="identity"><strong>${escape(document.childName)} 様</strong></div></header>
     <section class="goals"><div class="goal-label">支援目標</div>${cell('goals', document.goals)}</section>
     <div class="period">${escape(document.month.split('-')[0])}年${Number(document.month.split('-')[1])}月分</div>
-    <section class="records"><div class="table-heading">${PRINT_FIELDS.map(field => `<div>${PRINT_LABELS[field]}</div>`).join('')}</div>${slots}</section>
+    <section class="records"><div class="table-heading">${PRINT_FIELDS.map(field => `<div data-print-column="${field}" ${interactive?'role="button" tabindex="0" aria-label="'+PRINT_LABELS[field]+'の列を選択"':''}>${PRINT_LABELS[field]}</div>`).join('')}</div>${slots}</section>
     <footer><div>${escape(document.createdDate)}　作成者：${escape(document.creator)}</div><div class="guardian">（保護者署名）________________________________</div></footer>
   </main>${interactive ? PRINT_PREVIEW_SCRIPT : ''}</body></html>`;
 }
@@ -106,11 +108,26 @@ export function supportBatchPrintHtml(documents:SupportPrintBatchDocument[],sett
   const rendered=documents.map(doc=>supportPrintHtml(doc.documentData,doc.rows,{...settings,fonts:{...settings.fonts,goals:settings.fonts[doc.key+':goals']}},false));
   const styles=rendered[0]?.match(/<style>([\s\S]*?)<\/style>/)?.[1]||'';
   let pages=rendered.map((html,index)=>html.match(/<body>([\s\S]*?)<\/body>/)![1].replace('id="paper"','class="batch-paper"'+(index===0?' id="paper"':'')).replace('data-cell="goals"','data-cell="'+escape(documents[index].key+':goals')+'"')).join('');
-  if(interactive)pages=pages.replace(/data-cell="([^"]*)"/g,'data-cell="$1" role="button" tabindex="0"');
+  if(interactive)pages=pages.replace(/data-print-column="([^"]*)"/g,'data-print-column="$1" role="button" tabindex="0"').replace(/data-cell="([^"]*)"/g,'data-cell="$1" role="button" tabindex="0"');
   // All pages share the individual print layout; each child always starts a new sheet.
   return '<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>専門的支援実施計画 一括印刷</title><style>'+styles.replaceAll('#paper','.batch-paper')+' .batch-paper{break-after:page;} .batch-paper:last-of-type{break-after:auto;} @media print{html,body{height:auto;}}'+(interactive?' [data-cell]{cursor:pointer;}':'')+'</style></head><body>'+pages+(interactive?PRINT_PREVIEW_SCRIPT:'')+'</body></html>';
 }
 export async function printSupportBatch(documents:SupportPrintBatchDocument[],settings:SupportPrintSettings){
   if(!documents.length)throw new Error('印刷する児童を選択してください。');
   await printPreviewHtml(supportBatchPrintHtml(documents,settings),'専門的支援実施計画の一括印刷',SUPPORT_PRINT_PAGE);
+}
+
+/** 除外した日も再選択できるよう、プレビューだけは全日を6日ずつ表示する。 */
+export function supportSelectionPreviewHtml(documents:SupportPrintBatchDocument[],settings:SupportPrintSettings,selectedRows:string[]){
+  const rendered:string[]=[];
+  for(const document of documents){
+    for(let start=0;start<Math.max(1,document.rows.length);start+=6){
+      const goalKey=document.key?document.key+':goals':'goals';
+      let html=supportPrintHtml(document.documentData,document.rows.slice(start,start+6),{...settings,previewSelectedRows:selectedRows,fonts:{...settings.fonts,goals:settings.fonts[goalKey]}},true);
+      html=html.replace('data-cell="goals"','data-cell="'+escape(goalKey)+'"');rendered.push(html);
+    }
+  }
+  const styles=rendered[0]?.match(/<style>([\s\S]*?)<\/style>/)?.[1]||'';
+  const pages=rendered.map((html,index)=>html.match(/<body>([\s\S]*?)<\/body>/)![1].replace(/<script>[\s\S]*?<\/script>/g,'').replace('id="paper"','class="preview-paper"'+(index===0?' id="paper"':''))).join('');
+  return '<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>'+styles.replaceAll('#paper','.preview-paper')+'</style></head><body>'+pages+PRINT_PREVIEW_SCRIPT+'</body></html>';
 }

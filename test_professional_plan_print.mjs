@@ -20,7 +20,7 @@ const documents=[{...doc,key:'draft',label:'計画書（案）',plan:{...plan,st
 const office=load('src/lib/officeUtils.ts'),scope=load('src/lib/excelExportOfficeScope.ts',{'./officeUtils':office}),attendance=load('src/lib/supportOfficeAttendance.ts',{'./excelExportOfficeScope':scope});
 const support=load('src/lib/supportImplementationPrint.ts',{'./printPreview':preview,'./supportOfficeAttendance':attendance});
 const {SupportImplementationPrintSettings}=load('src/components/SupportImplementationPrintSettings.tsx',{'./ViewportModal':{ViewportModal:props=>React.createElement('div',props)},'../lib/supportImplementationPrint':support,'../lib/professionalPlanPrint':engine});
-const modal=renderToStaticMarkup(React.createElement(SupportImplementationPrintSettings,{professionalDocuments:documents,onClose:()=>{}}));assert.ok(modal.includes('固定レイアウト（A4横）'));assert.ok(modal.includes('文字サイズをまとめて調整'));assert.ok(modal.includes('複数選択モード'));assert.ok(modal.includes('height:630mm'));assert.ok(!modal.includes('印刷は最大6日分です'));
+const modal=renderToStaticMarkup(React.createElement(SupportImplementationPrintSettings,{professionalDocuments:documents,onClose:()=>{}}));assert.ok(modal.includes('固定レイアウト（A4横）'));assert.ok(!modal.includes('文字サイズをまとめて調整'));assert.ok(!modal.includes('複数選択モード'));assert.ok(modal.includes('height:630mm'));assert.ok(!modal.includes('印刷は最大6日分です'));
 console.log('PASS: A4横281×194mmを使う固定レイアウト、全項目・5領域・署名保持、案/本案/利用時間の3枚、共通の複数選択付き印刷設定、元データ保持とHTML安全性');
 
 const lineHeightMm=9*25.4/72*1.3;

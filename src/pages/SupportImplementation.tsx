@@ -1409,9 +1409,9 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
                     <Target size={16} className="text-primary" /> 支援目標
                   </h3>
                   <div className="flex items-center gap-2 print:hidden">
-                    <span className="text-[10px] font-bold text-slate-500">反映元:</span>
+                    <span className="text-xs font-bold text-slate-500">反映元:</span>
                     <span className="text-sm font-semibold text-slate-700">
-                      {profPlan ? '本案：'+supportGoalPlanMonth(profPlan).replace('-', '年')+'月開始分（自動）' : '対象月に有効な本案なし'}
+                      {profPlan ? '本案：'+supportGoalPlanMonth(profPlan).replace('-', '年')+'月開始分' : '対象月に有効な本案なし'}
                     </span>
                   </div>
                 </div>
@@ -1421,11 +1421,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
                     <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
                       Excelインポート / 登録テキストより反映中
                     </span>
-                  ) : profPlan ? (
-                    <span className="text-[10px] text-primary font-semibold bg-primary/10 px-2 py-0.5 rounded-full">
-                      {supportGoalPlanMonth(profPlan).replace('-', '年')+'月開始分の本案から自動反映中'}
-                    </span>
-                  ) : (
+                  ) : profPlan ? null : (
                     <span className="text-[10px] text-amber-600 font-semibold bg-amber-50 px-2 py-0.5 rounded-full">
                       ※対象月に有効な本案がありません（開始月を含む6か月）
                     </span>

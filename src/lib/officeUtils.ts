@@ -76,3 +76,9 @@ export function resolveChildOffices(data: Record<string, any>): string[] {
   // 事業所未設定の児童をサーチへ表示する、既存の初期所属ルールと合わせる。
   return resolved.size ? [...resolved] : [OFFICE_IDS.SEARCH];
 }
+
+/** 閲覧対象を登録済み事業所に限定し、担当の有無とは分けて所属を判定する。 */
+export function childrenForOffice<T extends {offices?:any;archived?:boolean}>(children:T[],officeId:string,offices:{id:string;name:string}[]):T[]{
+  const office=offices.find(value=>value.id===officeId);if(!office)return [];
+  return children.filter(child=>!child.archived&&(matchesOffice(officeId,resolveChildOffices(child))||matchesOffice(office.name,resolveChildOffices(child))));
+}

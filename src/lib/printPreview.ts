@@ -5,6 +5,14 @@ export const PRINT_PREVIEW_SCRIPT = `<script>
       cell.addEventListener('click',select);
       cell.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();select(event);}});
     }
+    const columns=[...document.querySelectorAll('[data-print-column]')];
+    const columnCells=column=>[...column.closest('.records').querySelectorAll('[data-cell]')].filter(cell=>cell.dataset.cell.endsWith(':'+column.dataset.printColumn));
+    for(const column of columns){
+      const select=()=>parent.postMessage({type:'support-print-select-column',keys:columnCells(column).map(cell=>cell.dataset.cell)},'*');
+      column.addEventListener('click',select);
+      column.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();select();}});
+    }
+    for(const input of document.querySelectorAll('[data-print-row]'))input.addEventListener('change',()=>parent.postMessage({type:'support-print-row',key:input.dataset.printRow,checked:input.checked},'*'));
     function measure() {
       const keys = [];
       for (const cell of cells) {
@@ -22,6 +30,7 @@ export const PRINT_PREVIEW_SCRIPT = `<script>
       if(event.data?.type==='support-print-selection'&&Array.isArray(event.data.keys)) {
         const selected=new Set(event.data.keys);
         for(const cell of cells){const active=selected.has(cell.dataset.cell);cell.classList.toggle('selected',active);cell.setAttribute('aria-pressed',String(active));}
+        for(const column of columns){const members=columnCells(column);const active=members.length>0&&members.every(cell=>selected.has(cell.dataset.cell));column.classList.toggle('selected',active);column.setAttribute('aria-pressed',String(active));}
       }});
     const paper=document.getElementById('paper');
     if(paper)new ResizeObserver(measure).observe(paper);

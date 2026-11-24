@@ -1058,7 +1058,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
                   value={plan.managerName}
                   onChange={(e) => update('managerName', e.target.value)}
                   onBlur={()=>update('managerName',cleanProfessionalManagerName(plan.managerName))}
-                  placeholder="氏名を入力"
+                  placeholder="未設定"
                 />
                 <span className="text-sm ml-2">印</span>
                 {activeTab !== 'draft' && (

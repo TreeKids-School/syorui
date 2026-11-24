@@ -1,3 +1,4 @@
+import {OfficeNavigationContext} from './components/OfficeNavigationContext';
 import {setAuditActor,setAuditChildren} from './lib/documentAudit';
 import {getMonitoringPlans} from './lib/monitoringPlans';
 import {measureRead} from './lib/readDiagnostics';
@@ -31,6 +32,8 @@ function AppContent({ user }: { user: User }) {
   const [staffAccount, setStaffAccount] = useState(() => resolveStaffAccount({}, user.displayName || ''));
   useEffect(()=>setAuditActor(user.uid,staffAccount.name,staffAccount.color),[user.uid,staffAccount]);
   const [selectedOfficeId, setSelectedOfficeId] = useState<string>('LNrWc8f6G703aUYRZ5e2'); // デフォルト: Search
+  const [showAssignedOnlyByDefault,setShowAssignedOnlyByDefault]=useState(true);
+  const changeOffice=(id:string)=>{if(!offices.some(office=>office.id===id))return;setShowAssignedOnlyByDefault(false);setSelectedOfficeId(id);};
   const [offices, setOffices] = useState<{ id: string, name: string }[]>([]);
   const [children, setChildren] = useState<Child[]>([]);
   useEffect(()=>setAuditChildren(children),[children]);
@@ -224,6 +227,7 @@ function AppContent({ user }: { user: User }) {
     {readError && <div role="alert" className="fixed inset-x-4 top-4 z-[10000] rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{readError}<button type="button" className="ml-4 underline" onClick={() => {void fetchChildrenAndPlans();void refreshMonitoring(true);}}>再試行</button></div>}
     {!readError && officeReadError && <div role="alert" className="fixed inset-x-4 top-4 z-[10000] rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">事業所情報を読み込めませんでした。{officeReadError}<button type="button" className="ml-4 underline" onClick={() => void initOffice()}>再試行</button></div>}
     <StaffAccountContext.Provider value={staffAccount}>
+    <OfficeNavigationContext.Provider value={{children,offices,showAssignedOnlyByDefault,onOfficeChange:changeOffice}}>
     <Routes>
       <Route element={
         <Layout 
@@ -231,12 +235,12 @@ function AppContent({ user }: { user: User }) {
           selectedOfficeId={selectedOfficeId}
         />
       }>
-        <Route path="/" element={<ChildList childrenData={filteredChildren} selectedOfficeId={selectedOfficeId} offices={offices} onOfficeChange={setSelectedOfficeId} />} />
+        <Route path="/" element={<ChildList key={selectedOfficeId} childrenData={filteredChildren} selectedOfficeId={selectedOfficeId} offices={offices} onOfficeChange={changeOffice} />} />
         <Route path="/monthly-summary" element={
           <MonthlySummary 
             key={selectedOfficeId}
             childrenData={filteredChildren} 
-            onOfficeChange={setSelectedOfficeId}
+            onOfficeChange={changeOffice}
             selectedOfficeId={selectedOfficeId} 
             offices={offices} 
           />
@@ -245,7 +249,7 @@ function AppContent({ user }: { user: User }) {
           <ChildDashboard 
             childrenData={children} 
             selectedOfficeId={selectedOfficeId}
-            onOfficeChange={setSelectedOfficeId}
+            onOfficeChange={changeOffice}
             offices={offices}
           />
         } />
@@ -279,6 +283,7 @@ function AppContent({ user }: { user: User }) {
       {/* 未マッチはトップへ */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </OfficeNavigationContext.Provider>
     </StaffAccountContext.Provider>
     </>
   );

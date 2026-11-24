@@ -70,7 +70,11 @@ const script=selectedHtml.match(/<script>([\s\S]*?)<\/script>/)[1];
 const messages=[],events={},parent={postMessage:message=>messages.push(message)};
 const fakeCells=selectedCells.map(key=>({dataset:{cell:key},events:{},classes:new Map(),attributes:new Map(),classList:{toggle(name,value){this.owner.classes.set(name,value);}},addEventListener(name,callback){this.events[name]=callback;},setAttribute(name,value){this.attributes.set(name,value);},querySelector(){return {scrollHeight:10,clientHeight:20,scrollWidth:10,clientWidth:20};}}));
 for(const cell of fakeCells)cell.classList.owner=cell;
-vm.runInNewContext(script,{parent,document:{querySelectorAll:()=>fakeCells,getElementById:()=>({}),fonts:{ready:Promise.resolve()}},window:{addEventListener:(name,callback)=>events[name]=callback},requestAnimationFrame:()=>{},ResizeObserver:class {observe(){}}});
+const fakeColumn={dataset:{printColumn:'resultInfo'},events:{},classes:new Map(),attributes:new Map(),classList:{toggle(name,value){fakeColumn.classes.set(name,value);}},closest:()=>({querySelectorAll:()=>fakeCells}),addEventListener(name,callback){this.events[name]=callback;},setAttribute(name,value){this.attributes.set(name,value);}};
+const fakeRow={dataset:{printRow:'2026-11-02'},checked:false,events:{},addEventListener(name,callback){this.events[name]=callback;}};
+vm.runInNewContext(script,{parent,document:{querySelectorAll:selector=>selector==='[data-cell]'?fakeCells:selector==='[data-print-column]'?[fakeColumn]:selector==='[data-print-row]'?[fakeRow]:[],getElementById:()=>({}),fonts:{ready:Promise.resolve()}},window:{addEventListener:(name,callback)=>events[name]=callback},requestAnimationFrame:()=>{},ResizeObserver:class {observe(){}}});
+fakeColumn.events.click();assert.equal(messages.at(-1).type,'support-print-select-column');assert.equal(messages.at(-1).keys.join(','),selectedCells[0]);
+fakeRow.events.change();assert.equal(messages.at(-1).type,'support-print-row');assert.equal(messages.at(-1).key,'2026-11-02');assert.equal(messages.at(-1).checked,false);
 fakeCells[0].events.click({ctrlKey:true});assert.equal(messages.at(-1).additive,true);
 fakeCells[0].events.click({metaKey:true});assert.equal(messages.at(-1).additive,true);
 fakeCells[0].events.click({});assert.equal(messages.at(-1).additive,false);
@@ -102,3 +106,13 @@ assert.equal(chosen[0].rows.length,1);assert.equal(chosen[0].rows[0].futurePlan,
 assert.notEqual(chosen[0].rows[0].key,chosen[1].rows[0].key);
 assert.equal(daily.a['11月2日'].content.futurePlan,'  ','print snapshot must not modify saved records');
 console.log('PASS: batch child isolation, selected-office adopted attendance only, absence/waitlist/archive exclusion, future fallback, A4 per-child page breaks, independent cell fonts and six-day guard');
+
+const previewRows=Array.from({length:8},(_,i)=>({...rows[0],key:'preview-'+i,date:'11月'+(i+1)+'日'}));
+const previewHtml=engine.supportSelectionPreviewHtml([{key:'',documentData:doc,rows:previewRows}],settings,['preview-1','preview-7']);
+assert.equal((previewHtml.match(/class="preview-paper"/g)||[]).length,2);
+assert.equal((previewHtml.match(/data-print-row="/g)||[]).length,8);
+assert.equal((previewHtml.match(/type="checkbox"[^>]*checked/g)||[]).length,2);
+assert.ok(previewHtml.includes('data-cell="goals"'));
+assert.ok(previewHtml.includes('data-print-row="preview-7"'));
+assert.ok(!engine.supportPrintHtml(doc,rows,settings).includes('data-print-row="'));
+console.log('PASS: preview row checkboxes retain excluded dates, paginate all eight dates, select a column and leave actual print free of controls');

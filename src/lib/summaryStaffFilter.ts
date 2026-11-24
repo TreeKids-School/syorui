@@ -10,3 +10,6 @@ export function filterSummaryStaff<T extends {id?:string}>(children:T[],assignme
   if(filter.startsWith('staff:'))return children.filter(child=>child.id&&assignments[child.id]===filter.slice(6));
   return [];
 }
+
+/** 初期の本人絞り込みで、照合不能なアカウントの一覧を空にしない。 */
+export function effectiveSummaryStaffFilter(filter:string,ready:boolean,ownStaffId:string){return filter==='mine'&&ready&&!ownStaffId?'all':filter;}

@@ -1,4 +1,6 @@
-import {filterSummaryStaff,resolveOwnStaffId} from '../lib/summaryStaffFilter';
+import {OfficeNavigationContext} from '../components/OfficeNavigationContext';
+import {useIsMobile} from '../hooks/useIsMobile';
+import {effectiveSummaryStaffFilter,filterSummaryStaff,resolveOwnStaffId} from '../lib/summaryStaffFilter';
 import {DocumentChangeLog} from '../components/DocumentChangeLog';
 import {appendDocumentAudit,auditDocumentWrite} from '../lib/documentAudit';
 import {measureRead} from '../lib/readDiagnostics';
@@ -138,10 +140,13 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
   const [isLoading, setIsLoading] = useState(true);
   const [monthlyReadError, setMonthlyReadError] = useState('');
   const monthlyReadInFlight = useRef('');
-  const [staffFilter,setStaffFilter]=useState('mine');
+  const isMobile=useIsMobile();
+  const officeNavigation=React.useContext(OfficeNavigationContext);
+  const [mobileStaffFilter,setStaffFilter]=useState(officeNavigation?.showAssignedOnlyByDefault===false?'all':'mine');
+  const staffFilter=isMobile?mobileStaffFilter:'all';
   const [mobileHeaderSlot,setMobileHeaderSlot]=useState<HTMLElement|null>(null);
   useEffect(()=>{setMobileHeaderSlot(document.getElementById('mobile-summary-header-slot'));},[]);
-  const assignedOnlyToggles=[{label:'担当児童のみ表示',checked:staffFilter==='mine',onChange:(checked:boolean)=>setStaffFilter(checked?'mine':'all')}];
+
   const [childOrder, setChildOrder] = useState<SummaryChildOrder>('original');
   const [today, setToday] = useState(() => japanDateKey());
   useEffect(() => {
@@ -1102,7 +1107,9 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
   const ownStaffId=resolveOwnStaffId(staffList,auth.currentUser?.uid||'',loginStaffName);
   const staffFilterReady=staffAssignmentLoadedScope===selectedOfficeId+'_'+currentMonth;
-  const sortedChildren=useMemo(()=>staffFilter!=='all'&&!staffFilterReady?[]:filterSummaryStaff(orderedChildren,assignedStaffMap,staffFilter,ownStaffId),[orderedChildren,assignedStaffMap,staffFilter,ownStaffId,staffFilterReady]);
+  const effectiveStaffFilter=effectiveSummaryStaffFilter(staffFilter,staffFilterReady,ownStaffId);
+  const assignedOnlyToggles=isMobile&&(!staffFilterReady||!!ownStaffId)?[{label:'担当児童のみ表示',checked:effectiveStaffFilter==='mine',onChange:(checked:boolean)=>setStaffFilter(checked?'mine':'all')}]:[];
+  const sortedChildren=useMemo(()=>effectiveStaffFilter!=='all'&&!staffFilterReady?[]:filterSummaryStaff(orderedChildren,assignedStaffMap,effectiveStaffFilter,ownStaffId),[orderedChildren,assignedStaffMap,effectiveStaffFilter,ownStaffId,staffFilterReady]);
 
   // 割り振り用の記入数。採用日や表の必要日数そのものは変更しない。
   const childAdoptedDayCounts = useMemo(() => Object.fromEntries(childrenData.filter(child => child.id).map(child => {
@@ -1722,7 +1729,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
       {/* 列幅を保ち、収まらない場合は表の中で横スクロール */}
       <div className="flex-1 min-h-0 bg-white border border-slate-200/80 rounded-2xl shadow-sm overflow-hidden flex flex-col">
         {staffAssignmentLoadError&&<p role="alert" className="px-3 py-2 text-xs text-rose-600">{staffAssignmentLoadError}<button type="button" onClick={()=>setStaffAssignmentReload(value=>value+1)} className="ml-3 min-h-10 rounded-xl border px-3">担当を再読み込み</button></p>}
-        {isLoading||(staffFilter!=='all'&&!staffFilterReady&&!staffAssignmentLoadError) ? (
+        {isLoading||(effectiveStaffFilter!=='all'&&!staffFilterReady&&!staffAssignmentLoadError) ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3">
             <Loader2 className="w-8 h-8 text-primary animate-spin" />
             <p className="text-sm text-slate-400">データを読み込み中...</p>
@@ -2547,7 +2554,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                     <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-sm text-slate-700"><span>令和（年）</span><input type="number" min="1" step="1" aria-label="作成日の令和年" value={implementationDraft.implementationYear} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationYear: e.target.value }))} className="min-h-10 w-16 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" /></label>
                     <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-sm text-slate-700"><span>月</span><input type="number" min="1" max="12" step="1" aria-label="作成日の月" value={implementationDraft.implementationMonth} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationMonth: e.target.value }))} className="min-h-10 w-16 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" /></label>
                     <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-sm text-slate-700"><span>日</span><input type="number" min="1" max="31" step="1" aria-label="作成日の日" value={implementationDraft.implementationDay} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationDay: e.target.value }))} className="min-h-10 w-16 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" /></label>
-                    <label className="flex min-w-0 flex-1 items-center gap-2 text-sm text-slate-700"><span className="shrink-0">作成者</span><input type="text" aria-label="専門的支援実施計画の作成者" value={implementationDraft.implementationCreator} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationCreator: e.target.value }))} className="min-h-10 min-w-0 flex-1 w-32 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" placeholder="作成者名" /></label>
+                    <label className="flex min-w-0 flex-1 items-center gap-2 text-sm text-slate-700"><span className="shrink-0">作成者</span><input type="text" aria-label="専門的支援実施計画の作成者" value={implementationDraft.implementationCreator} onChange={e => setImplementationDraft(prev => ({ ...prev, implementationCreator: e.target.value }))} className="min-h-10 min-w-0 flex-1 w-32 rounded-lg bg-slate-50 px-3 py-2 text-right outline-emerald-600" placeholder="未設定" /></label>
                   </div>
                   </SettingsGroup>
                 </>}

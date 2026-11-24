@@ -5,3 +5,9 @@ assert.equal(exports.resolveOwnStaffId(staff,'s1','担当 二'),'s1');assert.equ
 const ids=value=>value.map(child=>child.id);assert.deepEqual(ids(exports.filterSummaryStaff(children,assignments,'all','s1')),['a','b','c','d']);assert.deepEqual(ids(exports.filterSummaryStaff(children,assignments,'mine','s1')),['a','d']);assert.deepEqual(ids(exports.filterSummaryStaff(children,assignments,'mine','')),[]);assert.deepEqual(ids(exports.filterSummaryStaff(children,assignments,'staff:s2','s1')),['b']);assert.deepEqual(ids(exports.filterSummaryStaff(children,assignments,'unassigned','s1')),['c']);assert.equal(Object.keys(assignments).length,3);
 const source=fs.readFileSync('src/pages/MonthlySummary.tsx','utf8');assert.ok(source.includes('summarySupportPrintTargets(orderedChildren'));assert.ok(!source.includes('summarySupportPrintTargets(sortedChildren'));assert.ok(source.includes('orderedChildren.filter(child => child.id && childWritingDays'));assert.ok(!source.includes('staffFilter, year, month]'));
 console.log('PASS: account ID and unique-name resolution, own/specific/unassigned staff filters, no silent fallback, and full-scope distribution/batch printing preserved');
+
+assert.equal(exports.effectiveSummaryStaffFilter('mine',false,''),'mine');
+assert.equal(exports.effectiveSummaryStaffFilter('mine',true,''),'all');
+assert.equal(exports.effectiveSummaryStaffFilter('mine',true,'s1'),'mine');
+assert.equal(exports.effectiveSummaryStaffFilter('all',true,''),'all');
+assert.deepEqual(ids(exports.filterSummaryStaff(children,assignments,exports.effectiveSummaryStaffFilter('mine',true,''),'')),['a','b','c','d']);

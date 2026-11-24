@@ -1,7 +1,8 @@
+import {OfficeNavigationContext} from '../components/OfficeNavigationContext';
 import {DropdownSelect} from '../components/ui/DropdownSelect';
 import {StaffAccountContext} from '../components/StaffAccountBadge';
 import {auth} from '../lib/firebase';
-import {filterSummaryStaff,resolveOwnStaffId} from '../lib/summaryStaffFilter';
+import {effectiveSummaryStaffFilter,filterSummaryStaff,resolveOwnStaffId} from '../lib/summaryStaffFilter';
 import React, {useEffect, useMemo, useState} from 'react';
 import {orderSummaryChildren, japanDateKey} from '../lib/summaryChildOrder';
 import type {SummaryChildOrder} from '../lib/summaryChildOrder';
@@ -19,17 +20,20 @@ type ChildListProps = {
   onOfficeChange: (id: string) => void;
 };
 
-export const ChildList: React.FC<ChildListProps> = ({ childrenData, selectedOfficeId }) => {
-  const {childOrder, setVisibleMobileChildren} = useOutletContext<{
+export const ChildList: React.FC<ChildListProps> = ({ childrenData, selectedOfficeId, offices, onOfficeChange }) => {
+  const {childOrder, setChildOrder, setVisibleMobileChildren} = useOutletContext<{
     childOrder: SummaryChildOrder;
+    setChildOrder:(order:SummaryChildOrder)=>void;
     setVisibleMobileChildren: (value: {scope: string; ids: string[]}) => void;
   }>();
   const account=React.useContext(StaffAccountContext);
-  const [staffFilter,setStaffFilter]=useState('mine');
+  const officeNavigation=React.useContext(OfficeNavigationContext);
+  const [mobileStaffFilter,setStaffFilter]=useState(officeNavigation?.showAssignedOnlyByDefault===false?'all':'mine');
   const [staffData,setStaffData]=useState<{key:string;data:Awaited<ReturnType<typeof loadChildListOrderData>>}|null>(null);
   const [staffError,setStaffError]=useState('');
   const [today, setToday] = useState(() => japanDateKey());
   const [isMobile, setIsMobile] = useState(() => window.matchMedia('(max-width: 767px)').matches);
+  const requestedStaffFilter=isMobile?mobileStaffFilter:'all';
   const [retry, setRetry] = useState(0);
   const [orderData, setOrderData] = useState<{key: string; data: Awaited<ReturnType<typeof loadChildListOrderData>>} | null>(null);
   const [readError, setReadError] = useState<{key: string; message: string} | null>(null);
@@ -55,6 +59,7 @@ export const ChildList: React.FC<ChildListProps> = ({ childrenData, selectedOffi
   }, [selectedOfficeId, today, childOrder, readKey, needsRead, isMobile, retry]);
   const staffKey=selectedOfficeId+':'+today.slice(0,7);
   const staffInfo=staffData?.key===staffKey?staffData.data:childOrder==='staff'&&orderData?.key===readKey?orderData.data:null;
+  const staffFilter=effectiveSummaryStaffFilter(requestedStaffFilter,!!staffInfo,resolveOwnStaffId(staffInfo?.staff||[],auth.currentUser?.uid||'',account.name));
   useEffect(()=>{
     if(!isMobile||staffFilter==='all'||staffInfo)return;
     let cancelled=false;setStaffError('');
@@ -77,7 +82,8 @@ export const ChildList: React.FC<ChildListProps> = ({ childrenData, selectedOffi
     const ordered=orderSummaryChildren(visibleChildren, childOrder, {
       assignedStaff: data?.assignedStaff || {}, staff: data?.staff || [], attendingToday, attendanceCounts,
     });
-    return filterSummaryStaff(ordered,staffInfo?.assignedStaff||{},staffFilter,resolveOwnStaffId(staffInfo?.staff||[],auth.currentUser?.uid||'',account.name));
+    const ownStaffId=resolveOwnStaffId(staffInfo?.staff||[],auth.currentUser?.uid||'',account.name);
+    return filterSummaryStaff(ordered,staffInfo?.assignedStaff||{},staffFilter==='mine'&&staffInfo&&!ownStaffId?'all':staffFilter,ownStaffId);
   }, [childrenData, childOrder, orderData, readKey, selectedOfficeId, today,staffInfo,staffFilter,account.name]);
   const error = (readError?.key === readKey ? readError.message : '')||(staffFilter!=='all'?staffError:'');
   const loading = isMobile && ((needsRead && orderData?.key !== readKey)||(staffFilter!=='all'&&!staffInfo)) && !error;
@@ -87,6 +93,7 @@ export const ChildList: React.FC<ChildListProps> = ({ childrenData, selectedOffi
   return (
     <>
     <section className="md:hidden space-y-4">
+      <DropdownSelect label={offices.find(office=>office.id===selectedOfficeId)?.name||'事業所を選択'} value={selectedOfficeId} options={offices.map(office=>({value:office.id,label:office.name}))} onChange={id=>{setChildOrder('original');onOfficeChange(id);}}/>
       <DropdownSelect label="担当の表示" value={staffFilter} onChange={setStaffFilter} options={[{value:'all',label:'すべての児童'},{value:'mine',label:'自分の担当児童のみ'},{value:'unassigned',label:'担当未設定の児童'},...(staffInfo?.staff||[]).map(member=>({value:'staff:'+member.id,label:member.name+'の担当児童'}))]}/>
       {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">並べ替え情報を読み込めませんでした。{error}<button type="button" onClick={() => setRetry(value => value + 1)} className="ml-2 underline">再試行</button></div>}
       {loading ? <p role="status" className="py-8 text-center text-sm text-slate-500">児童一覧を読み込み中…</p> : <div className="space-y-2">

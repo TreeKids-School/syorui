@@ -1,0 +1,7 @@
+import {useEffect,useState} from 'react';
+/** 下部UIと同じブレークポイントでスマホ表示を判定する。 */
+export function useIsMobile(){
+  const [isMobile,setIsMobile]=useState(()=>window.matchMedia('(max-width: 767px)').matches);
+  useEffect(()=>{const media=window.matchMedia('(max-width: 767px)');const update=()=>setIsMobile(media.matches);update();media.addEventListener('change',update);return()=>media.removeEventListener('change',update);},[]);
+  return isMobile;
+}
