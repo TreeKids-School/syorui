@@ -19,7 +19,7 @@ import {HeaderAccountActions} from '../components/HeaderAccountActions';
 import {DropdownPanel} from '../components/ui/DropdownPanel';
 import {menuActionClass} from '../components/ui/menuStyles';
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Plus, Printer, Settings, Download, CheckCircle2, UploadCloud, Archive } from 'lucide-react';
 import {
   doc, serverTimestamp, collection, query, where, getDocs as firestoregetDocs, writeBatch, runTransaction
@@ -211,6 +211,11 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
   const officeName = currentOffice ? currentOffice.name : 'Search';
   const { childId } = useParams<{ childId: string }>();
   const navigate = useNavigate();
+  const [logParams]=useSearchParams();
+  const logMonth=/^\d{4}-(0[1-9]|1[0-2])$/.test(logParams.get('logMonth')||'')?logParams.get('logMonth')!:'';
+  const logDocument=logParams.get('logDocument')||'';
+  const logKind=logParams.get('logKind')==='draft'?'draft':logParams.get('logKind')==='hours'?'hours':'final';
+  const logTargetPending=React.useRef(!!logDocument);
 
   // textareaの上でスクロール（ホイール）したときに、親のメインコンテナをスクロールさせるヘルパー
   const handleWheel = (e: React.WheelEvent<HTMLTextAreaElement>) => {
@@ -223,7 +228,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
     }
   };
 
-  const [currentMonth, setCurrentMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [currentMonth, setCurrentMonth] = useState(logMonth||new Date().toISOString().slice(0, 7));
   const [managerSettingsOpen,setManagerSettingsOpen]=useState(false);
   const [mobileHeaderSlot,setMobileHeaderSlot]=useState<HTMLElement|null>(null);
   useEffect(()=>{setMobileHeaderSlot(document.getElementById('mobile-summary-header-slot'));},[]);
@@ -234,7 +239,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
   const [variantIndex,setVariantIndex]=useState(0),[variantOptions,setVariantOptions]=useState<number[]>([0]);
   const [transferDirection,setTransferDirection]=useState<'export'|'import'|null>(null);
   const [exportDocuments,setExportDocuments]=useState<ProfessionalPrintDocument[]|null>(null);
-  const [activeTab, setActiveTab] = useState<'final' | 'draft' | 'hours'>('final');
+  const [activeTab, setActiveTab] = useState<'final' | 'draft' | 'hours'>(logKind);
   const [plan, setPlan] = useState<ProfessionalPlanDoc | null>(null);
   const [hoursPlan, setHoursPlan] = useState<ServiceHoursPlan | null>(null);
   const [printDocuments,setPrintDocuments]=useState<ProfessionalPrintDocument[]|null>(null);
@@ -309,10 +314,13 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
       const snapshot=await getDocs(query(collection(db,name),...constraints));if(!valid())return;
       const records=snapshot.docs.map(record=>({...record.data(),id:record.id} as ProfessionalPlanDoc|ServiceHoursPlan)).filter(value=>(value.startMonth||value.createdAt?.slice(0,7))===currentMonth);
       setVariantRecords(records.map(record=>({id:record.id!,variantIndex:record.variantIndex,isPrimary:record.isPrimary,archived:record.archived})));
+      const logTarget=logTargetPending.current&&currentMonth===logMonth&&activeTab===logKind?records.find(record=>record.id===logDocument):undefined;
+      if(logTargetPending.current&&currentMonth===logMonth&&activeTab===logKind&&!logTarget){setDocumentActionError('変更ログの書類が見つかりません。削除または対象月の変更をご確認ください。');return;}
+      if(logTarget&&(logTarget.archived===true)!==showArchived){setShowArchived(logTarget.archived===true);return;}
       const eligible=records.filter(record=>(record.archived===true)===showArchived);
       const preferred=primaryVariantIndex(eligible);setPrimaryIndex(preferred);
       setVariantOptions(Array.from(new Set(eligible.length?eligible.map(record=>record.variantIndex||0):[0])).sort((a,b)=>a-b));
-      const selected=explicitVariantScope.current===localSelectionScope&&eligible.some(record=>(record.variantIndex||0)===variantIndex)?variantIndex:preferred;
+      const selected=logTarget?(logTarget.variantIndex||0):explicitVariantScope.current===localSelectionScope&&eligible.some(record=>(record.variantIndex||0)===variantIndex)?variantIndex:preferred;
       explicitVariantScope.current=localSelectionScope;
       if(selected!==variantIndex){setVariantIndex(selected);return;}
       let value=eligible.find(record=>(record.variantIndex||0)===selected);
@@ -322,6 +330,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
       }
       if(activeTab!=='hours')value={...value,managerName:cleanProfessionalManagerName((value as ProfessionalPlanDoc).managerName)||defaultManager} as ProfessionalPlanDoc;
       autoSaver.current!.loaded(loadScope,professionalPlanDraft(value,childId,selectedOfficeId,currentMonth,activeTab));
+      logTargetPending.current=false;
       loadedScope.current=loadScope;setAutoStatus('saved');
       if(activeTab==='hours')setHoursPlan(value as ServiceHoursPlan);else setPlan(value as ProfessionalPlanDoc);
     }catch(error){console.error('fetchData error:',error);if(valid())setAutoStatus('error');}
@@ -338,6 +347,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
 
   // showArchived の変更、または availableMonths の取得後に currentMonth を適切に切り替える
   useEffect(() => {
+    if(logMonth&&currentMonth===logMonth)return;
     if (availableMonths.length === 0) {
       const current = new Date().toISOString().slice(0, 7);
       setCurrentMonth(current);

@@ -3,7 +3,7 @@ import {auditDocumentWrite} from '../lib/documentAudit';
 import {ChildSwitcher} from '../components/ChildSwitcher';
 import {DocumentTypeSelect} from '../components/DocumentTypeSelect';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Calendar,
@@ -58,6 +58,8 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
 }) => {
   const { childId } = useParams<{ childId: string }>();
   const navigate = useNavigate();
+  const [logParams]=useSearchParams();
+  const logDate=logParams.get('date')||'';
 
   // 今日の日付 (YYYY-MM-DD)
   const todayStr = useMemo(() => {
@@ -69,7 +71,7 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
   }, []);
 
   // 状態管理
-  const [serviceDate, setServiceDate] = useState<string>(todayStr);
+  const [serviceDate, setServiceDate] = useState<string>(/^\d{4}-\d{2}-\d{2}$/.test(logDate)?logDate:todayStr);
   const [createdDate, setCreatedDate] = useState<string>(todayStr);
   const [officeName, setOfficeName] = useState<string>('');
   const [authorName, setAuthorName] = useState<string>('');

@@ -9,8 +9,7 @@ import type {SummaryChildOrder} from '../lib/summaryChildOrder';
 import {loadChildListOrderData} from '../lib/childListOrderData';
 import {officeAttendanceDates} from '../lib/supportOfficeAttendance';
 import {describeReadError} from '../lib/readError';
-import { ArrowLeft } from 'lucide-react';
-import { NavLink, useOutletContext } from 'react-router-dom';
+import { Navigate, NavLink, useOutletContext } from 'react-router-dom';
 import type { Child } from '../data/mockData';
 
 type ChildListProps = {
@@ -90,6 +89,7 @@ export const ChildList: React.FC<ChildListProps> = ({ childrenData, selectedOffi
   useEffect(() => {
     setVisibleMobileChildren({scope: `${selectedOfficeId}:${today}`, ids: !loading && !error ? orderedChildren.flatMap(child => child.id ? [child.id] : []) : []});
   }, [selectedOfficeId, today, loading, error, orderedChildren, setVisibleMobileChildren]);
+  if(!isMobile)return <Navigate to="/monthly-summary" replace/>;
   return (
     <>
     <section className="md:hidden space-y-4">
@@ -109,19 +109,6 @@ export const ChildList: React.FC<ChildListProps> = ({ childrenData, selectedOffi
         {!error && orderedChildren.length === 0 && <p className="py-8 text-center text-sm text-slate-500">{childOrder === 'today' ? '本日出席予定の児童はいません。' : '登録されている児童はいません。'}</p>}
       </div>}
     </section>
-    <div className="hidden md:flex flex-col items-center justify-center min-h-[60vh] animate-fade-in">
-      <div className="glass-panel p-12 flex flex-col items-center gap-6 max-w-md text-center">
-        <div className="w-20 h-20 rounded-full bg-primary/10 text-primary flex items-center justify-center mb-2">
-          <ArrowLeft size={40} className="animate-pulse-slow" />
-        </div>
-        <h2 className="text-2xl font-bold text-slate-800">児童を選択してください</h2>
-        <p className="text-slate-500 leading-relaxed">
-          実施状況表の児童名から書類を選択して、<br />
-          書類の作成や確認を始めてください。
-        </p>
-        <NavLink to="/monthly-summary" className="rounded-xl bg-primary px-4 py-2 text-white">実施状況表を開く</NavLink>
-      </div>
-    </div>
     </>
   );
 };
