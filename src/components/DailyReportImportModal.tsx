@@ -1,3 +1,4 @@
+import {useOptionalDocumentAccess} from './DocumentAccessBoundary';
 import {ViewportModal} from './ViewportModal';
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { 
@@ -7,7 +8,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
-  collection, query, where, getDocs, getDoc, doc, writeBatch, serverTimestamp 
+  collection, query, where, getDocs, getDoc, doc, writeBatch as firestoreWriteBatch, serverTimestamp 
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import type { Child } from '../data/mockData';
@@ -221,6 +222,8 @@ export const DailyReportImportModal: React.FC<DailyReportImportModalProps> = ({
   ],
   loginStaffName = ''
 }) => {
+  const documentAccess=useOptionalDocumentAccess();
+  const writeBatch=documentAccess?.writeBatch||firestoreWriteBatch;
   const [step, setStep] = useState<'upload' | 'preview'>('upload');
   const [groups, setGroups] = useState<ParsedChildMonthGroup[]>([]);
   const [fileName, setFileName] = useState('');

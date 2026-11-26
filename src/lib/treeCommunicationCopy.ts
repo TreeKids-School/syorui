@@ -1,4 +1,4 @@
-import {SUPPORT_RESULT_NARRATIVE_RULES} from './supportResultNarrative';
+import {SUPPORT_RESULT_NARRATIVE_RULES,SUPPORT_RESULT_PRIORITY_RULES} from './supportResultNarrative';
 
 export function supportResultInstruction(month: string, multiple = false): string {
   const [year, monthNumber] = month.split('-');
@@ -12,8 +12,8 @@ export function supportResultInstruction(month: string, multiple = false): strin
 【「療育を行った結果」の作成ルール】
 ━━━━━━━━━━━━━━━━━━━━
 
-1. 【文量と記録に含める内容（130〜140字程度）】
-130〜140字程度を目安に、ツリー通信に記載された具体的な事実をもとに記述してください。
+1. 【文量と記録に含める内容（140字以内）】
+130〜140字を目安に、140字以内でツリー通信に記載された具体的な事実をもとに記述してください。
 児童の行動・工夫、職員の働きかけへの反応、できたことを自然につないでください。これは内容の観点であり、「導入→展開→結び」の固定構成にはしないでください。
 冒頭の全体説明は不要です。最初の一文から具体的な行動や反応を書き、活動の一覧やその日の総括を前置きしないでください。
 
@@ -36,6 +36,8 @@ export function supportResultInstruction(month: string, multiple = false): strin
   × 〇〇を呈した・〇〇が見受取れた → ○ 〇〇する場面があった、〇〇が見られた
   × 巧緻性を要する → ○ 手先（足先）の細かな動きが必要な
 
+${SUPPORT_RESULT_PRIORITY_RULES}
+
 ${SUPPORT_RESULT_NARRATIVE_RULES}
 
 ■ 文章構成とトーン:
@@ -43,7 +45,7 @@ ${SUPPORT_RESULT_NARRATIVE_RULES}
   - 「〜であり、〜した」という重い接続を避け、「〜して、〜した」「〜した。また、〜だった」と区切って読みやすくする。
   - 漢字を多用しすぎず、適度にひらがなを混ぜて視覚的な圧迫感を減らす。
 
-■ 「できたこと」へのフォーカス:
+■ 課題を残し、具体的な反応・できたことを記述:
   - 「向上した」「改善した」といった主観的な評価よりも、「〜ができていた」「〜しようとする姿勢があった」という事実ベースの肯定的な記述を優先する。
 
 5. 【禁止事項】
@@ -66,19 +68,19 @@ ${SUPPORT_RESULT_NARRATIVE_RULES}
 【対象月】${formattedMonth}
 
 ■ 児童 (ID: [児童ID1])
-- 9月1日: 具体的な行動・反応から始める130〜140字程度の文章。活動全体の説明や末尾の文字数カウントは不要
-- 9月5日: 具体的な行動・反応から始める130〜140字程度の文章。活動全体の説明や末尾の文字数カウントは不要
+- ${Number(monthNumber)}月1日: 具体的な行動・反応から始める130〜140字程度の文章。活動全体の説明や末尾の文字数カウントは不要
+- ${Number(monthNumber)}月5日: 具体的な行動・反応から始める130〜140字程度の文章。活動全体の説明や末尾の文字数カウントは不要
 
 ■ 児童 (ID: [児童ID2])
-- 9月2日: 具体的な行動・反応から始める130〜140字程度の文章。活動全体の説明や末尾の文字数カウントは不要
+- ${Number(monthNumber)}月2日: 具体的な行動・反応から始める130〜140字程度の文章。活動全体の説明や末尾の文字数カウントは不要
 \`\`\`` : `【出力フォーマット】
 \`\`\`
 【対象月】${formattedMonth}
 
-■ 9月1日
+■ ${Number(monthNumber)}月1日
 具体的な行動・反応から始める130〜140字程度の文章。活動全体の説明や末尾の文字数カウントは不要
 
-■ 9月5日
+■ ${Number(monthNumber)}月5日
 具体的な行動・反応から始める130〜140字程度の文章。活動全体の説明や末尾の文字数カウントは不要
 \`\`\``;
   return introduction + format;
@@ -86,4 +88,16 @@ ${SUPPORT_RESULT_NARRATIVE_RULES}
 
 export function buildTreeCommunicationCopy(month: string, text: string, multiple = false): string {
   return supportResultInstruction(month,multiple)+'\n\n【以下が対象月のツリー通信です】\n'+text.trim()+'\n';
+}
+
+export function supportGoalContext(goals:string):string {
+  return '【支援目標（優先順位判定用）】\n'+(goals.trim()||'未設定：この児童のツリー通信内の事実だけで判断してください。');
+}
+
+export function buildSingleDayTreeCommunicationCopy(month:string,date:string,text:string,goals=''):string{
+  return buildTreeCommunicationCopy(month,'【対象月】'+month.replace('-','年')+'月\n\n'+supportGoalContext(goals)+'\n\n【ツリー通信】\n■ '+date+'\n'+text.trim(),false);
+}
+
+export function childGoalTreeSource(id:string,goals:string,lines:string[]):string{
+  return '■ 児童 (ID: '+id+')\n'+supportGoalContext(goals)+'\n\n【採用日のツリー通信】\n'+lines.join('\n');
 }

@@ -1,3 +1,4 @@
+import {buildSingleDayTreeCommunicationCopy} from '../lib/treeCommunicationCopy';
 import React, { useRef, useEffect } from 'react';
 import { 
   Archive, Trash2, 
@@ -19,11 +20,12 @@ const SUPPORT_CONTENT_OPTIONS = [
 ];
 
 export const SupportImplementationRow = React.memo(({ 
-  row, idx, isNewsletterCollapsed, isEditingDate, onEditDate, onFinishEditDate,
+  row, idx, supportGoals, isNewsletterCollapsed, isEditingDate, onEditDate, onFinishEditDate,
   updateRowDate, toggleSupportContent, updateRowContent, handleSyncFromNewsletter, archiveRow, onDeleteRow, newsletters,
   isSelectionMode, isSelected, onToggleSelect, isRecentlyImported
 }: {
   row: DailyReport;
+  supportGoals: string;
   idx: number;
   isNewsletterCollapsed: boolean;
   isEditingDate: boolean;
@@ -79,7 +81,7 @@ export const SupportImplementationRow = React.memo(({
     }
     
     // クリップボードにコピー
-    navigator.clipboard.writeText(textToCopy)
+    navigator.clipboard.writeText(buildSingleDayTreeCommunicationCopy(row.planMonth,row.date,textToCopy,supportGoals))
       .then(() => {
         // コピー成功時に専用のGemini URLを新しいタブで開く
         window.open('https://gemini.google.com/gem/673e06b69513', '_blank');

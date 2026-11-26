@@ -1,3 +1,4 @@
+import {useDocumentAccess} from '../components/DocumentAccessBoundary';
 import {createPortal} from 'react-dom';
 import {measureReads} from '../lib/readDiagnostics';
 import {auditDocumentWrite} from '../lib/documentAudit';
@@ -22,7 +23,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Plus, Printer, Settings, Download, CheckCircle2, UploadCloud, Archive } from 'lucide-react';
 import {
-  doc, serverTimestamp, collection, query, where, getDocs as firestoregetDocs, writeBatch, runTransaction
+  doc, serverTimestamp, collection, query, where, getDocs as firestoregetDocs, runTransaction
 } from 'firebase/firestore';
 const getDocs=measureReads('個別支援計画書',firestoregetDocs);
 
@@ -211,6 +212,8 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
   const officeName = currentOffice ? currentOffice.name : 'Search';
   const { childId } = useParams<{ childId: string }>();
   const navigate = useNavigate();
+  const documentAccess=useDocumentAccess();
+  const writeBatch=documentAccess.writeBatch;
   const [logParams]=useSearchParams();
   const logMonth=/^\d{4}-(0[1-9]|1[0-2])$/.test(logParams.get('logMonth')||'')?logParams.get('logMonth')!:'';
   const logDocument=logParams.get('logDocument')||'';
@@ -268,6 +271,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
     await batch.commit();
   },(key,status)=>{if(activeScope.current===key)setAutoStatus(status);});
   useEffect(()=>()=>{void autoSaver.current!.flush(scope).catch(()=>{});},[scope]);
+  useEffect(()=>{if(documentAccess.writable)void autoSaver.current!.flushAll().catch(()=>{});},[documentAccess.writable]);
   useEffect(()=>{
     const flush=()=>{void autoSaver.current!.flushAll().catch(()=>{});};
     window.addEventListener('pagehide',flush);document.addEventListener('visibilitychange',flush);
@@ -379,7 +383,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
     setIsSaving(true);setDocumentActionError('');
     try{
       await autoSaver.current!.flushAll();
-      await saveProfessionalPrimary(variantRecords.map(record=>({collection:activeTab==='hours'?HOURS_PLAN_COL:PLAN_COL,id:record.id})),value.id);
+      await documentAccess.track(saveProfessionalPrimary(variantRecords.map(record=>({collection:activeTab==='hours'?HOURS_PLAN_COL:PLAN_COL,id:record.id})),value.id,documentAccess.verify));
       await fetchData();
     }catch(error){setDocumentActionError(error instanceof Error?error.message:'メインの変更に失敗しました。');}
     finally{setIsSaving(false);}
@@ -405,7 +409,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
     setIsSaving(true);setDocumentActionError('');
     try{
       await autoSaver.current!.flushAll();
-      await archiveProfessionalVariants(archiveDialog.items.filter(item=>archiveDialog.selected.includes(item.collection+'/'+item.id)),archiveDialog.archive);
+      await documentAccess.track(archiveProfessionalVariants(archiveDialog.items.filter(item=>archiveDialog.selected.includes(item.collection+'/'+item.id)),archiveDialog.archive,documentAccess.verify));
       setArchiveDialog(null);await fetchAvailableMonths();await fetchData();
     }catch(error){setDocumentActionError(error instanceof Error?error.message:'アーカイブの変更に失敗しました。');}
     finally{setIsSaving(false);}
@@ -644,12 +648,13 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
         const source={plans:plans.docs.map(record=>record.data() as ProfessionalPlanDoc),hours:hours.docs.map(record=>record.data() as ServiceHoursPlan)};
         if([...source.plans,...source.hours].some(value=>(value.startMonth||value.createdAt?.slice(0,7))===newMonth))throw new Error('追加先の月には書類があります。上書きせず中止しました。');
         const targets=copyProfessionalPeriod(source,childId,selectedOfficeId,copyMonth,newMonth,copyKinds);
-        await runTransaction(db,async transaction=>{
+        await documentAccess.track(runTransaction(db,async transaction=>{
+          await documentAccess.verify(transaction);
           const refs=targets.map(target=>doc(db,target.collection,target.id));
           const existing=await Promise.all(refs.map(ref=>transaction.get(ref)));
           if(existing.some(record=>record.exists()))throw new Error('追加先の月には書類があります。上書きせず中止しました。');
           targets.forEach((target,index)=>{transaction.set(refs[index],{...target.data,updatedAt:serverTimestamp()});auditDocumentWrite(transaction,{officeId:selectedOfficeId,book:'professional',childId,month:newMonth,documentId:target.id,operation:'月をコピーして追加'},null,target.data);});
-        });
+        }));
         const copiedKinds=targets.map(target=>target.collection===HOURS_PLAN_COL?'hours':target.data.status as 'final'|'draft');
         if(!copiedKinds.includes(activeTab))setActiveTab(copiedKinds[0]);
       }

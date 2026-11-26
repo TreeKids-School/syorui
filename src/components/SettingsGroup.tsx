@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react';
 
 /** 関連する設定を、見出しと区切り線のあるリストにまとめる。 */
-export function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
+export function SettingsGroup({ title, children, id }: { title: string; children: ReactNode; id?:string }) {
   return (
-    <fieldset className="min-w-0 space-y-2 border-0 p-0">
+    <fieldset id={id} className="min-w-0 space-y-2 border-0 p-0">
       <legend className="mb-2 px-3 text-xs font-semibold text-slate-500">{title}</legend>
       <div className="overflow-hidden rounded-2xl bg-white shadow-xs ring-1 ring-slate-200/60 [&>*+*]:border-t [&>*+*]:border-slate-100">{children}</div>
     </fieldset>

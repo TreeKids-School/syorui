@@ -1,3 +1,4 @@
+import type {Transaction} from 'firebase/firestore';
 import {measureReads,measureRead} from './readDiagnostics';
 import {auditDocumentWrite} from './documentAudit';
 import {invalidateMonthlyTreeCommunications} from './monthlyTreeCommunications';
@@ -75,7 +76,7 @@ export async function previewTransfer(input:TransferRecord[],scope:TransferScope
   }
   return result;
 }
-export async function importTransferRecords(input:TransferRecord[],scope:TransferScope,overwrite:boolean,onProgress?:(saved:number,skipped:number)=>void){
+export async function importTransferRecords(input:TransferRecord[],scope:TransferScope,overwrite:boolean,onProgress?:(saved:number,skipped:number)=>void,verify?:(transaction:Transaction)=>Promise<void>){
   const records=input.map(transferDestination);
   if(!records.length)throw new Error('取り込むデータがありません。');
   for(const record of records){const error=transferScopeError(record,scope);if(error)throw new Error(error);}
@@ -83,6 +84,7 @@ export async function importTransferRecords(input:TransferRecord[],scope:Transfe
   for(let index=0;index<records.length;index+=200){
     const group=records.slice(index,index+200);
     const result=await runTransaction(db,async transaction=>{
+      await verify?.(transaction);
       const refs=group.map(record=>doc(db,record.kind,record.id)),snapshots=await Promise.all(refs.map(ref=>measureRead('CSV／JSON保存時の確認',transaction.get(ref))));
       let saved=0,skipped=0;
       group.forEach((record,n)=>{

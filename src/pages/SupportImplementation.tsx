@@ -1,3 +1,8 @@
+import {useDocumentAccess} from '../components/DocumentAccessBoundary';
+import {supportGoalContext} from '../lib/treeCommunicationCopy';
+import {adoptedTreeCommunications} from '../lib/adoptedTreeCommunications';
+import {implementationCompletionPath,completedImplementationChildren} from '../lib/implementationCompletion';
+import {syncSupportRowsByDate,updateSupportRowContent} from '../lib/supportRowEditing';
 import {createPortal} from 'react-dom';
 import {measureReads} from '../lib/readDiagnostics';
 import {appendDocumentAudit} from '../lib/documentAudit';
@@ -39,7 +44,7 @@ import { ResultImportModal } from '../components/ResultImportModal';
 import { parseGoalsText } from '../lib/utils';
 import { performUndo, performRedo, type ImportHistoryAction } from '../lib/importHistory';
 import {
-  doc, getDoc as firestoregetDoc, getDocs as firestoregetDocs, writeBatch,
+  doc, getDoc as firestoregetDoc, getDocs as firestoregetDocs,
   collection, query, where, documentId,
   serverTimestamp
 } from 'firebase/firestore';
@@ -72,6 +77,8 @@ export const SupportImplementation: React.FC<SupportImplementationProps> = ({ ch
   const officeName = currentOffice ? currentOffice.name : 'Search';
   const { childId, month: urlMonth } = useParams<{ childId: string; month?: string }>();
   const navigate = useNavigate();
+  const documentAccess=useDocumentAccess();
+  const writeBatch=documentAccess.writeBatch;
 
   // 1) 月がURLにない場合はリダイレクト
   useEffect(() => {
@@ -83,6 +90,11 @@ export const SupportImplementation: React.FC<SupportImplementationProps> = ({ ch
 
   const currentMonth = urlMonth || new Date().toISOString().slice(0, 7);
 
+  const [monthCompletion,setMonthCompletion]=useState<{scope:string;completed:boolean}|null>(null);
+  const [savingCompletion,setSavingCompletion]=useState(false),[completionError,setCompletionError]=useState('');
+  const completionScope=selectedOfficeId+'_'+childId+'_'+currentMonth;
+  const completionReady=monthCompletion?.scope===completionScope;
+  const isMonthCompleted=completionReady&&monthCompletion.completed;
   const [planMeta, setPlanMeta] = useState<SupportPlanMeta | null>(null);
   const [rows, setRowsState] = useState<DailyReport[]>([]);
   const nextLocalRowKey = React.useRef(0);
@@ -104,7 +116,7 @@ export const SupportImplementation: React.FC<SupportImplementationProps> = ({ ch
   const [futurePlans, setFuturePlans] = useState<Record<string, string>>({});
   const [isConverting, setIsConverting] = useState(false);
   // 日付編集中の行インデックス (null = 全行ロック)
-  const [editingDateIdx, setEditingDateIdx] = useState<number | null>(null);
+  const [editingDateKey, setEditingDateKey] = useState<string | null>(null);
   const isNewsletterCollapsed = false;
   const [monthlySettings, setMonthlySettings] = useState<any>(null);
   const [availableProfPlans, setAvailableProfPlans] = useState<ProfessionalPlanDoc[]>([]);
@@ -268,6 +280,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
         );
       }
 
+      queries.push(getDoc(doc(db,...implementationCompletionPath(selectedOfficeId,currentMonth))));
       // children/{childId}/app_categories/書類管理/tree_communications の取得
       queries.push(
         getMonthlyTreeCommunications(childId, selectedOfficeId, currentMonth)
@@ -283,6 +296,9 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       const reportSnap1 = results[4] as any;
       const reportSnap2 = officeId ? results[5] as any : null;
       const treeCommSnap = results[results.length - 1] as any;
+      const completionSnap=results[results.length-2] as any;
+      setMonthCompletion({scope,completed:completedImplementationChildren(completionSnap.exists()?completionSnap.data():null).has(childId)});
+      setCompletionError('');
       const attendanceDates = selectedChild ? officeAttendanceDates(
         [...reportSnap1.docs, ...(reportSnap2?.docs || [])].map((d: any) => ({id: d.id, data: d.data()})),
         selectedChild, selectedOfficeId, currentMonth,
@@ -580,7 +596,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
               futurePlan: futurePlanMap[date] || "",
               isVerified: false,
             },
-            archived: false,
+            archived: true,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           });
@@ -746,6 +762,10 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
 
   const handleSave = useCallback(() => saveQueue.current.run(persistDraft), [persistDraft]);
 
+  const latestSave=React.useRef(handleSave);latestSave.current=handleSave;
+  useEffect(()=>{if(documentAccess.writable)void latestSave.current().catch(()=>{});},[documentAccess.writable]);
+  useEffect(()=>{const flush=()=>void latestSave.current().catch(()=>{});window.addEventListener('pagehide',flush);return()=>{window.removeEventListener('pagehide',flush);flush();};},[]);
+
   // ---- 自動保存デバウンス監視 ----
   useEffect(() => {
     if (isLoading || isConverting) return; // AI変換中は自動保存をトリガーしない
@@ -797,31 +817,16 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       alert('ツリー通信のデータが見つかりません。先にデータを取得してください。');
       return;
     }
-    setRows(prev =>
-      prev.map((row, i) => ({
-        ...row,
-        date: newsletterDates[i] ?? row.date,
-      }))
-    );
-    setEditingDateIdx(null);
+    setRows(previous=>syncSupportRowsByDate(previous,currentMonth,newsletters,futurePlans));
+    setEditingDateKey(null);
   };
 
   // ---- 選択した（または全ての）ツリー通信を日付別でコピー ----
   const getTreeCommunicationsText = () => {
     const [year, month] = currentMonth.split('-');
-    const byDate = new Map<string, {date:string; text:string}>();
-    for (const [date, text] of Object.entries(newsletters)) {
-      const key = supportDateKey(date, currentMonth);
-      if (key && officeAttendanceDateKeys.has(key) && text.trim()) byDate.set(key, {date, text:text.trim()});
-    }
-    for (const row of rows) {
-      const key = supportDateKey(row.date, currentMonth);
-      const text = row.content?.externalInfo?.trim();
-      if (key && officeAttendanceDateKeys.has(key) && text) byDate.set(key, {date:row.date,text});
-    }
-    const sorted = [...byDate].sort(([a],[b])=>a.localeCompare(b));
-    const count = sorted.length;
-    const copyText = '【対象月】'+year+'年'+parseInt(month,10)+'月\n\n'+sorted.map(([,item])=>'■ '+item.date+'\n'+item.text+'\n').join('\n');
+    const copied=adoptedTreeCommunications(currentMonth,rows,newsletters,officeAttendanceDateKeys);
+    const count=copied.length;
+    const copyText='【対象月】'+year+'年'+parseInt(month,10)+'月\n\n'+supportGoalContext(getTargetGoalsText())+'\n\n【採用日のツリー通信】\n'+copied.map(item=>'■ '+item.date+'\n'+item.text+'\n').join('\n');
 
     return count ? copyText.trim()+'\n' : '';
   };
@@ -891,9 +896,11 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
   };
 
   const archiveRow = (idx: number) => {
+    const target=rows[idx];if(!target?.localKey)return;
     setRows(prev => {
-      const toggled = prev[idx].archived;
-      const updated = prev.map((r, i) => i === idx ? { ...r, archived: !toggled } : r);
+      const current=prev.find(row=>row.localKey===target.localKey);if(!current)return prev;
+      const toggled = current.archived;
+      const updated = prev.map(r => r.localKey===target.localKey ? { ...r, archived: !toggled } : r);
       const active = updated.filter(r => !r.archived);
       const archived = updated.filter(r => r.archived);
       return [...active, ...archived];
@@ -901,8 +908,9 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
   };
 
   const updateRowDate = (idx: number, part: 'month' | 'day', val: string) => {
+    const target=rows[idx];if(!target?.localKey)return;
     setRows(prev => {
-      const row = prev[idx];
+      const row = prev.find(item=>item.localKey===target.localKey);if(!row)return prev;
       const currentMonth = row.date.match(/(\d+)月/)?.[1] ?? '';
       const currentDay = row.date.match(/(\d+)日/)?.[1] ?? '';
       const newDate = part === 'month'
@@ -919,7 +927,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       const content = newsletters[newDate] || '';
       const plan = futurePlans[newDate] || '';
 
-      return prev.map((r, i) => i === idx ? { 
+      return prev.map(r => r.localKey===target.localKey ? { 
         ...r, 
         date: newDate,
         content: {
@@ -932,21 +940,22 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
   };
 
   const updateRowContent = (idx: number, field: keyof DailyReport['content'], value: any) => {
-    setRows(prev => prev.map((r, i) =>
-      i === idx ? { ...r, content: { ...r.content, [field]: value } } : r
-    ));
+    const target=rows[idx],scope=selectedOfficeId+'_'+childId+'_'+currentMonth;
+    if(!target?.localKey||activeScope.current!==scope)return;
+    setRows(previous=>updateSupportRowContent(previous,target,field,value));
   };
 
   const toggleSupportContent = (rowIdx: number, option: string) => {
     const currentRow = rows[rowIdx];
+    if(!currentRow?.localKey)return;
     const currentSelected = currentRow.content.supportContent || [];
 
     if (!currentSelected.includes(option) && currentSelected.length >= 5) {
       alert('療育内容は5項目まで選択可能です。');
       return;
     }
-    setRows(previous => previous.map((row, index) => {
-      if (index !== rowIdx) return row;
+    setRows(previous => previous.map(row => {
+      if (row.localKey !== currentRow.localKey) return row;
       const selected = row.content.supportContent || [];
       const next = selected.includes(option) ? selected.filter(value => value !== option)
         : selected.length < 5 ? [...selected, option] : selected;
@@ -966,6 +975,23 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
   }, []);
 
 
+
+  const toggleMonthCompletion=async()=>{
+    if(!completionReady||savingCompletion||!planMeta||!childId)return;
+    const scope=completionScope,next=!isMonthCompleted;
+    setSavingCompletion(true);setCompletionError('');
+    try{
+      await handleSave();
+      if(activeScope.current!==scope)return;
+      if(lastSavedDraft.current!==scope+':'+latestDraft.current.signature)throw new Error('入力内容の保存が完了していません。保存後にもう一度お試しください。');
+      const batch=writeBatch(db);
+      batch.set(doc(db,...implementationCompletionPath(selectedOfficeId,currentMonth)),{completed:{[childId]:next}},{merge:true});
+      appendDocumentAudit(batch,{officeId:selectedOfficeId,book:'implementation',childId,month:currentMonth,documentId:selectedOfficeId+'_'+childId+'_'+currentMonth,label:'月次完了',operation:next?'今月を完了':'完了を解除'},[{field:'月次の完了状態',action:next?'完了':'未完了'}]);
+      await batch.commit();
+      if(activeScope.current===scope)setMonthCompletion({scope,completed:next});
+    }catch(error){if(activeScope.current===scope)setCompletionError(error instanceof Error?error.message:'完了状態を保存できませんでした。');}
+    finally{setSavingCompletion(false);}
+  };
 
   // AI単一処理
   const handleSingleAiConvert = async (idx: number) => {
@@ -988,7 +1014,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
     setIsConverting(true);
     try {
       // モデルは aiConvert.ts 内で gemini-1.5-flash に完全固定済み。動的選択は行わない。
-      const res = await convertToResult(row.content.externalInfo, apiKey, undefined, "1 / 1 (個別変換)");
+      const res = await convertToResult(row.content.externalInfo, apiKey, undefined, "1 / 1 (個別変換)", undefined, getTargetGoalsText());
       updateRowContent(idx, 'resultInfo', res);
       alert('変換が完了しました。');
     } catch (e: any) {
@@ -1371,6 +1397,10 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           />
         </div>
       </div>
+      <div className="flex flex-wrap items-center justify-end gap-2 print:hidden">
+        {completionError&&<p role="alert" className="text-sm text-rose-600">{completionError}</p>}
+        <button type="button" aria-pressed={isMonthCompleted} disabled={isLoading||!completionReady||savingCompletion||saveStatus==='saving'} onClick={()=>void toggleMonthCompletion()} className={'inline-flex min-h-10 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold disabled:opacity-50 '+(isMonthCompleted?'border-emerald-200 bg-emerald-50 text-emerald-700':'border-slate-200 bg-white text-slate-700 hover:bg-slate-50')}><Check size={18}/>{savingCompletion?'保存中…':isMonthCompleted?'今月は完了（未完了に戻す）':'今月を完了にする'}</button>
+      </div>
       {deleteTarget && deleteTarget.scope===selectedOfficeId+'_'+childId+'_'+currentMonth && <ViewportModal className="fixed inset-0 z-[10020] flex items-center justify-center bg-slate-900/50 p-4 print:hidden" onKeyDown={event=>{if(event.key==='Escape')setDeleteTarget(null);}}>
         <section role="alertdialog" aria-modal="true" aria-labelledby="delete-row-title" aria-describedby="delete-row-description" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
           <h3 id="delete-row-title" className="text-base font-bold text-slate-800">{deleteTarget.row.date}の行を削除しますか？</h3>
@@ -1636,13 +1666,14 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
             <div className="block md:table-row-group print:table-row-group">
               {rows.map((row, idx) => (
                 <SupportImplementationRow
-                  key={`${row.date}-${idx}-${row.childId}`}
+                  key={row.localKey}
                   row={row}
+                  supportGoals={getTargetGoalsText()}
                   idx={idx}
                   isNewsletterCollapsed={isNewsletterCollapsed}
-                  isEditingDate={editingDateIdx === idx}
-                  onEditDate={() => setEditingDateIdx(idx)}
-                  onFinishEditDate={() => setEditingDateIdx(null)}
+                  isEditingDate={editingDateKey === row.localKey}
+                  onEditDate={() => setEditingDateKey(row.localKey!)}
+                  onFinishEditDate={() => setEditingDateKey(null)}
                   updateRowDate={updateRowDate}
                   toggleSupportContent={toggleSupportContent}
                   updateRowContent={updateRowContent}

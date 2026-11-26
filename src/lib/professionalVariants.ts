@@ -1,3 +1,4 @@
+import type {Transaction} from 'firebase/firestore';
 import {auditDocumentWrite} from './documentAudit';
 import {doc,runTransaction,serverTimestamp} from 'firebase/firestore';
 import {db} from './firebase';
@@ -13,9 +14,10 @@ export function professionalMonthAvailability(records:(Variant&{startMonth?:stri
   return {months,archivedMonths:[...archived],archiveMap:Object.fromEntries(months.map(month=>[month,!active.has(month)&&archived.has(month)]))};
 }
 export type ProfessionalRecordRef={collection:string;id:string};
-export async function saveProfessionalPrimary(records:ProfessionalRecordRef[],selectedId:string){
+export async function saveProfessionalPrimary(records:ProfessionalRecordRef[],selectedId:string,verify?:(transaction:Transaction)=>Promise<void>){
   if(!records.some(record=>record.id===selectedId))throw new Error('メインにする書類が見つかりません。');
   await runTransaction(db,async transaction=>{
+    await verify?.(transaction);
     const refs=records.map(record=>doc(db,record.collection,record.id));
     const snapshots=await Promise.all(refs.map(ref=>transaction.get(ref)));
     const index=records.findIndex(record=>record.id===selectedId);
@@ -23,9 +25,10 @@ export async function saveProfessionalPrimary(records:ProfessionalRecordRef[],se
     records.forEach((record,i)=>{if(snapshots[i].exists()){const before=snapshots[i].data()!,after={isPrimary:record.id===selectedId};transaction.set(refs[i],{...after,updatedAt:serverTimestamp()},{merge:true});auditDocumentWrite(transaction,{officeId:before.officeId,book:'professional',childId:before.childId,month:before.startMonth||before.createdAt?.slice(0,7)||'',documentId:record.id,operation:'メイン指定'},before,{...before,...after});}});
   });
 }
-export async function archiveProfessionalVariants(records:ProfessionalRecordRef[],archived:boolean){
+export async function archiveProfessionalVariants(records:ProfessionalRecordRef[],archived:boolean,verify?:(transaction:Transaction)=>Promise<void>){
   if(!records.length)throw new Error('対象の書類を選択してください。');
   await runTransaction(db,async transaction=>{
+    await verify?.(transaction);
     const refs=records.map(record=>doc(db,record.collection,record.id));
     const snapshots=await Promise.all(refs.map(ref=>transaction.get(ref)));
     records.forEach((record,i)=>{if(snapshots[i].exists()){const before=snapshots[i].data()!,after={archived,...(archived?{isPrimary:false}:{})};transaction.set(refs[i],{...after,updatedAt:serverTimestamp()},{merge:true});auditDocumentWrite(transaction,{officeId:before.officeId,book:'professional',childId:before.childId,month:before.startMonth||before.createdAt?.slice(0,7)||'',documentId:record.id,operation:archived?'アーカイブ':'アーカイブ解除'},before,{...before,...after});}});

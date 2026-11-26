@@ -1,3 +1,4 @@
+import {APP_VERSION} from '../lib/appVersion';
 import {useState} from 'react';
 import {DropdownPanel} from './ui/DropdownPanel';
 import {menuActionClass} from './ui/menuStyles';
@@ -20,5 +21,6 @@ export function HeaderAccountActions() {
       }}>{signingOut?<Loader2 size={18} className="animate-spin"/>:<LogOut size={18}/>}<span>{signingOut?'ログアウト中…':'ログアウト'}</span></button>
       {error&&<p role="alert" className="px-3 py-2 text-xs text-rose-600">{error}</p>}
     </DropdownPanel>
+    <span aria-label={'バージョン '+APP_VERSION} title={'バージョン '+APP_VERSION} className="shrink-0 whitespace-nowrap text-xs tabular-nums text-slate-400">{APP_VERSION}</span>
   </div>;
 }

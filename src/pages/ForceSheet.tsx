@@ -1,3 +1,4 @@
+import {useDocumentAccess} from '../components/DocumentAccessBoundary';
 import {measureReads} from '../lib/readDiagnostics';
 import {auditDocumentWrite} from '../lib/documentAudit';
 import {ChildSwitcher} from '../components/ChildSwitcher';
@@ -23,7 +24,6 @@ import {
 import {
   doc,
   getDoc as firestoregetDoc,
-  writeBatch,
   serverTimestamp,
   collection,
   getDocs as firestoregetDocs
@@ -58,6 +58,8 @@ export const ForceSheet: React.FC<ForceSheetProps> = ({
 }) => {
   const { childId } = useParams<{ childId: string }>();
   const navigate = useNavigate();
+  const documentAccess=useDocumentAccess();
+  const writeBatch=documentAccess.writeBatch;
   const [logParams]=useSearchParams();
   const logDate=logParams.get('date')||'';
 

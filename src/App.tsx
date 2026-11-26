@@ -1,3 +1,4 @@
+import {DocumentAccessBoundary} from './components/DocumentAccessBoundary';
 import {OfficeNavigationContext} from './components/OfficeNavigationContext';
 import {setAuditActor,setAuditChildren} from './lib/documentAudit';
 import {getMonitoringPlans} from './lib/monitoringPlans';
@@ -254,27 +255,33 @@ function AppContent({ user }: { user: User }) {
           />
         } />
         <Route path="/children/:childId/professional-perspective" element={
+          <DocumentAccessBoundary officeId={selectedOfficeId} book="professional">
           <ProfessionalPerspective 
             childrenData={filteredChildren} 
             selectedOfficeId={selectedOfficeId} 
             offices={offices}
             onReload={()=>void refreshMonitoring(true)}
           />
+          </DocumentAccessBoundary>
         } />
         <Route path="/children/:childId/support-plan/:month?" element={
+          <DocumentAccessBoundary officeId={selectedOfficeId} book="implementation">
           <SupportImplementation 
             key={selectedOfficeId}
             childrenData={filteredChildren} 
             selectedOfficeId={selectedOfficeId} 
             offices={offices}
           />
+          </DocumentAccessBoundary>
         } />
         <Route path="/children/:childId/force-sheet" element={
+          <DocumentAccessBoundary officeId={selectedOfficeId} book="force">
           <ForceSheet 
             childrenData={filteredChildren} 
             selectedOfficeId={selectedOfficeId} 
             offices={offices} 
           />
+          </DocumentAccessBoundary>
         } />
         <Route path="/settings" element={<Navigate to="/monthly-summary" replace />} />
 

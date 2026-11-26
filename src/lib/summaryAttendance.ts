@@ -26,3 +26,10 @@ export function countSummaryAttendance(
   }
   return {totalCount, individualCount, nonIndividualCount: totalCount - individualCount};
 }
+
+/** 個別療育分を基準数へ上乗せするか、基準数の内数にするかを選ぶ。 */
+export function summaryAdoptionTargets(baseRequiredDays:number,individualCount:number,attendanceCount:number,addIndividualDays:boolean){
+  const individual=Math.max(0,Math.min(attendanceCount,individualCount));
+  const requiredDays=attendanceCount<=1?Math.max(0,attendanceCount):Math.min(6,addIndividualDays?baseRequiredDays+individual:Math.max(baseRequiredDays,individual));
+  return {requiredDays,nonIndividualCount:Math.max(0,requiredDays-individual)};
+}

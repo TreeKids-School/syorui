@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url),ts=require('typescript');
+function load(path){const exports={};vm.runInNewContext(ts.transpileModule(fs.readFileSync(path,'utf8'),{compilerOptions:{module:1,target:9}}).outputText,{exports,require});return exports;}
+const rows=load('src/lib/summaryTableRows.ts');
+assert.deepEqual(Array.from(rows.SUMMARY_COUNT_ROWS),['出席日数','必要日数','個別療育','集団療育']);
+assert.deepEqual(Array.from(rows.normalizeHiddenCountRows(['個別以外','集団療育','採用数','unknown'])),['集団療育']);
+const stat={attendanceCount:8,individualCount:2,requiredDays:4};
+assert.equal(rows.summaryCountValue('集団療育',stat),6);assert.equal(rows.summaryCountValue('個別療育',stat),2);
+const children=[{id:'a'},{id:'b'},{id:'c'}],stats={a:{attendanceCount:0},b:{attendanceCount:3}};
+assert.deepEqual(rows.filterZeroAttendanceChildren(children,stats,false),children);
+assert.deepEqual(Array.from(rows.filterZeroAttendanceChildren(children,stats,true)).map(c=>c.id),['b']);
+assert.deepEqual(Array.from(rows.filterZeroAttendanceChildren(children,{a:{attendanceCount:1},b:{attendanceCount:0}},true)).map(c=>c.id),['a']);
+const {createAccountSummaryOrderStore}=load('src/lib/accountSummaryOrderModel.ts');
+let resolveRead;const writes=[];const store=createAccountSummaryOrderStore(()=>new Promise(r=>resolveRead=r),async order=>{writes.push(order);});
+const pending=store.load();store.setOrder('name-asc');resolveRead('staff');await pending;await store.waitForSave();assert.equal(store.getSnapshot().order,'name-asc');assert.deepEqual(writes,['name-asc']);
+store.setOrder('staff');store.setOrder('attendance-desc');await store.waitForSave();assert.equal(writes.at(-1),'attendance-desc');assert.equal(store.getSnapshot().order,'attendance-desc');
+const other=createAccountSummaryOrderStore(async()=>'name-desc',async()=>{});await other.load();assert.equal(other.getSnapshot().order,'name-desc');assert.equal(store.getSnapshot().order,'attendance-desc');
+console.log('PASS: attendance counts, legacy row migration, zero-attendance monthly filter, account isolation and late-read/write ordering');

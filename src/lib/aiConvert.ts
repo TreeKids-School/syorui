@@ -1,4 +1,5 @@
-import {SUPPORT_RESULT_NARRATIVE_RULES} from './supportResultNarrative';
+import {supportGoalContext} from './treeCommunicationCopy';
+import {SUPPORT_RESULT_NARRATIVE_RULES,SUPPORT_RESULT_PRIORITY_RULES} from './supportResultNarrative';
 
 const SYSTEM_PROMPT = `あなたは放課後等デイサービスの支援記録を作成する専門員です。
 職員のメモ（ツリー通信）を「療育を行った結果」欄に記載する客観的かつ平易な支援記録に変換してください。
@@ -26,6 +27,8 @@ const SYSTEM_PROMPT = `あなたは放課後等デイサービスの支援記録
   × 課題を完遂・完遂した → ○ 最後まで取り組んだ、やり遂げた
   × 〇〇を呈した・〇〇が見受取れた → ○ 〇〇する場面があった、〇〇が見られた
   × 巧緻性を要する → ○ 手先（足先）の細かな動きが必要な
+
+${SUPPORT_RESULT_PRIORITY_RULES}
 
 ${SUPPORT_RESULT_NARRATIVE_RULES}
 
@@ -69,7 +72,8 @@ export async function convertToResult(
   apiKey: string,
   _preSelectedModel?: string,
   requestIndex?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  goals=''
 ): Promise<string> {
   if (!apiKey) {
     throw new Error('APIキーが指定されていません。');
@@ -89,7 +93,7 @@ export async function convertToResult(
     },
     contents: [{
       parts: [{
-        text: `以下のツリー通信を「療育を行った結果」に変換してください。\n\n【ツリー通信】\n${externalInfo}`
+        text: `以下のツリー通信を「療育を行った結果」に変換してください。\n\n${supportGoalContext(goals)}\n\n【ツリー通信】\n${externalInfo}`
       }]
     }],
     generationConfig: {
