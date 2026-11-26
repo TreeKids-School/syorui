@@ -16,3 +16,9 @@ export function auditScopes(book:AuditBook,childId:string,month:string){
 }
 export function auditScope(book:string,child:string,month:string){return (book&&child?'type:'+book+'|child:'+child:book?'type:'+book:child?'child:'+child:'all')+(month?'|month:'+month:'');}
 export function auditEntryId(now:number,random:string){return String(9_999_999_999_999-now).padStart(13,'0')+'_'+random;}
+
+/** 採用の切替だけの履歴は、内容の変更履歴と分けて表示する。旧ログも同じ基準で分類する。 */
+export function auditHistoryCategory(entry:{book?:string;operation?:string;category?:string;changes?:{field:string}[]}):'content'|'adoption'{
+  if(entry.category==='adoption'||entry.operation==='採用日変更')return 'adoption';
+  return entry.book==='implementation'&&!!entry.changes?.length&&entry.changes.every(change=>['採用日','アーカイブ状態'].includes(change.field))?'adoption':'content';
+}

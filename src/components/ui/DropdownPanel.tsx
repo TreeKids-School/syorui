@@ -5,8 +5,8 @@ import {dropdownPosition} from '../../lib/dropdownPosition';
 import {menuSurfaceClass,menuTriggerClass} from './menuStyles';
 
 /** 通知など、選択項目を持たない内容を操作位置の近くへ表示する。 */
-type DropdownPanelProps={label:string;itemCount?:number;preferredHeight?:number;contained?:boolean;mobileBottom?:boolean;icon?:ReactNode;triggerContent?:ReactNode;variant?:'icon'|'content'|'stacked';children:ReactNode|((close:()=>void)=>ReactNode)};
-export function DropdownPanel({label,itemCount=4,preferredHeight,contained=false,mobileBottom=false,icon,triggerContent,variant='icon',children}:DropdownPanelProps) {
+type DropdownPanelProps={label:string;onOpen?:()=>void;itemCount?:number;preferredHeight?:number;contained?:boolean;mobileBottom?:boolean;icon?:ReactNode;triggerContent?:ReactNode;variant?:'icon'|'content'|'stacked';children:ReactNode|((close:()=>void)=>ReactNode)};
+export function DropdownPanel({label,onOpen,itemCount=4,preferredHeight,contained=false,mobileBottom=false,icon,triggerContent,variant='icon',children}:DropdownPanelProps) {
   const id=useId(),trigger=useRef<HTMLButtonElement>(null),panel=useRef<HTMLDivElement>(null),keyboard=useRef(false);
   const [position,setPosition]=useState<ReturnType<typeof dropdownPosition>|null>(null);
   const locate=(rect:DOMRect)=>{const viewport=window.visualViewport;const width=viewport?.width||window.innerWidth,height=viewport?.height||window.innerHeight,left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
@@ -30,6 +30,7 @@ export function DropdownPanel({label,itemCount=4,preferredHeight,contained=false
     <button ref={trigger} type="button" title={label} aria-label={label} aria-haspopup="dialog" aria-expanded={!!position} aria-controls={position?id:undefined} className={triggerClass} onClick={event=>{
       if(position){setPosition(null);return;}
       const rect=trigger.current?.getBoundingClientRect();if(!rect)return;
+      onOpen?.();
       keyboard.current=event.detail===0;
       setPosition(locate(rect));
     }}>{triggerContent||icon}</button>

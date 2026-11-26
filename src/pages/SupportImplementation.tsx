@@ -1,3 +1,4 @@
+import {notifyAccountTasksChanged} from '../lib/accountTaskEvents';
 import {useDocumentAccess} from '../components/DocumentAccessBoundary';
 import {supportGoalContext} from '../lib/treeCommunicationCopy';
 import {adoptedTreeCommunications} from '../lib/adoptedTreeCommunications';
@@ -988,6 +989,7 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
       batch.set(doc(db,...implementationCompletionPath(selectedOfficeId,currentMonth)),{completed:{[childId]:next}},{merge:true});
       appendDocumentAudit(batch,{officeId:selectedOfficeId,book:'implementation',childId,month:currentMonth,documentId:selectedOfficeId+'_'+childId+'_'+currentMonth,label:'月次完了',operation:next?'今月を完了':'完了を解除'},[{field:'月次の完了状態',action:next?'完了':'未完了'}]);
       await batch.commit();
+      notifyAccountTasksChanged(selectedOfficeId);
       if(activeScope.current===scope)setMonthCompletion({scope,completed:next});
     }catch(error){if(activeScope.current===scope)setCompletionError(error instanceof Error?error.message:'完了状態を保存できませんでした。');}
     finally{setSavingCompletion(false);}
@@ -1397,10 +1399,6 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
           />
         </div>
       </div>
-      <div className="flex flex-wrap items-center justify-end gap-2 print:hidden">
-        {completionError&&<p role="alert" className="text-sm text-rose-600">{completionError}</p>}
-        <button type="button" aria-pressed={isMonthCompleted} disabled={isLoading||!completionReady||savingCompletion||saveStatus==='saving'} onClick={()=>void toggleMonthCompletion()} className={'inline-flex min-h-10 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold disabled:opacity-50 '+(isMonthCompleted?'border-emerald-200 bg-emerald-50 text-emerald-700':'border-slate-200 bg-white text-slate-700 hover:bg-slate-50')}><Check size={18}/>{savingCompletion?'保存中…':isMonthCompleted?'今月は完了（未完了に戻す）':'今月を完了にする'}</button>
-      </div>
       {deleteTarget && deleteTarget.scope===selectedOfficeId+'_'+childId+'_'+currentMonth && <ViewportModal className="fixed inset-0 z-[10020] flex items-center justify-center bg-slate-900/50 p-4 print:hidden" onKeyDown={event=>{if(event.key==='Escape')setDeleteTarget(null);}}>
         <section role="alertdialog" aria-modal="true" aria-labelledby="delete-row-title" aria-describedby="delete-row-description" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
           <h3 id="delete-row-title" className="text-base font-bold text-slate-800">{deleteTarget.row.date}の行を削除しますか？</h3>
@@ -1433,8 +1431,8 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
 
           return (
             <div className="mb-4 bg-slate-50 rounded-xl border overflow-hidden">
-              <div className="flex items-center justify-between px-5 py-3 border-b bg-white">
-                <div className="flex items-center gap-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-b bg-white">
+                <div className="flex flex-wrap items-center gap-4">
                   <h3 className="text-sm font-bold flex items-center gap-2 uppercase">
                     <Target size={16} className="text-primary" /> 支援目標
                   </h3>
@@ -1446,7 +1444,9 @@ ${debugError.errorDetails ? JSON.stringify(debugError.errorDetails, null, 2) : '
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3 print:hidden">
+                <div className="ml-auto flex flex-wrap items-center justify-end gap-3 print:hidden">
+        <button type="button" aria-pressed={isMonthCompleted} disabled={isLoading||!completionReady||savingCompletion||saveStatus==='saving'} onClick={()=>void toggleMonthCompletion()} className={'inline-flex min-h-10 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold disabled:opacity-50 '+(isMonthCompleted?'border-emerald-200 bg-emerald-50 text-emerald-700':'border-slate-200 bg-white text-slate-700 hover:bg-slate-50')}>{isMonthCompleted?<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white"><Check size={14} strokeWidth={3}/></span>:<Check size={18}/>} {savingCompletion?'保存中…':isMonthCompleted?'今月は完了（未完了に戻す）':'今月を完了にする'}</button>
+                  {completionError&&<p role="alert" className="w-full text-right text-sm text-rose-600">{completionError}</p>}
                   {isViewingImported ? (
                     <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
                       Excelインポート / 登録テキストより反映中

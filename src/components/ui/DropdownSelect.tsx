@@ -5,9 +5,9 @@ import {Check,ChevronDown} from 'lucide-react';
 import {dropdownPosition} from '../../lib/dropdownPosition';
 import {menuItemClass,menuSurfaceClass,menuTriggerClass} from './menuStyles';
 
-type Props<T extends string>={label:string;value:T;options:readonly {value:T;label:string;icon?:ReactNode}[];onChange:(value:T)=>void;icon?:ReactNode;iconOnly?:boolean;variant?:'control'|'heading';toggles?:readonly {label:string;checked:boolean;onChange:(checked:boolean)=>void}[]};
+type Props<T extends string>={label:string;value:T;options:readonly {value:T;label:string;icon?:ReactNode}[];onChange:(value:T)=>void;icon?:ReactNode;iconOnly?:boolean;showSelectedLabel?:boolean;variant?:'control'|'heading';toggles?:readonly {label:string;checked:boolean;onChange:(checked:boolean)=>void}[]};
 /** 画面中央へ移動せず、操作位置の近くに開く共通の単一選択メニュー。 */
-export function DropdownSelect<T extends string>({label,value,options,onChange,icon,iconOnly=false,variant='control',toggles=[]}:Props<T>) {
+export function DropdownSelect<T extends string>({label,value,options,onChange,icon,iconOnly=false,showSelectedLabel=false,variant='control',toggles=[]}:Props<T>) {
   const id=useId(),trigger=useRef<HTMLButtonElement>(null),panel=useRef<HTMLDivElement>(null);
   const keyboard=useRef(false);
   const [position,setPosition]=useState<ReturnType<typeof dropdownPosition>|null>(null);
@@ -33,7 +33,7 @@ export function DropdownSelect<T extends string>({label,value,options,onChange,i
       className={variant==='heading'?'inline-flex min-h-10 min-w-0 items-center gap-2 rounded-xl px-1 py-1 text-left text-lg font-bold text-slate-800 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-primary md:text-xl':iconOnly?menuTriggerClass.replace('px-3','px-2')+' h-10 w-10 shrink-0':menuTriggerClass}
       onClick={event=>{keyboard.current=event.detail===0;if(position)setPosition(null);else open();}}
       onKeyDown={event=>{if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();keyboard.current=true;open();}}}>
-      {icon}{iconOnly?<span className="sr-only">{label}</span>:label}{!iconOnly&&<ChevronDown size={14} aria-hidden="true"/>}
+      {icon}{iconOnly?<span className="sr-only">{label}</span>:showSelectedLabel?(options.find(option=>option.value===value)?.label||label):label}{!iconOnly&&<ChevronDown size={14} aria-hidden="true"/>}
     </button>
     {position&&createPortal(<div ref={panel} id={id} data-dropdown-owner={ownerId||undefined} role="menu" aria-label={label} data-print-exclude className={'fixed z-[10030] overflow-y-auto overscroll-contain print:hidden '+menuSurfaceClass} style={position}
       onKeyDown={event=>{

@@ -1,3 +1,4 @@
+import {APP_VERSION} from '../lib/appVersion';
 import React, { useEffect, useState } from 'react';
 import type {SummaryChildOrder} from '../lib/summaryChildOrder';
 import {japanDateKey} from '../lib/summaryChildOrder';
@@ -30,6 +31,7 @@ export const Layout: React.FC<LayoutProps> = ({
 
   return (
     <div className="flex h-[100dvh] overflow-hidden relative">
+      <span aria-label={'バージョン '+APP_VERSION} className="pointer-events-none absolute right-5 top-0 z-10 text-[10px] leading-3 tabular-nums text-slate-400 print:hidden">{APP_VERSION}</span>
       <main
         className={`flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden relative`}
       >

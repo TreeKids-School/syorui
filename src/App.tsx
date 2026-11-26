@@ -1,7 +1,8 @@
+import {AccountTasksProvider} from './components/AccountTasksProvider';
 import {DocumentAccessBoundary} from './components/DocumentAccessBoundary';
 import {OfficeNavigationContext} from './components/OfficeNavigationContext';
 import {setAuditActor,setAuditChildren} from './lib/documentAudit';
-import {getMonitoringPlans} from './lib/monitoringPlans';
+import {getMonitoringPlans,patchMonitoringPlan} from './lib/monitoringPlans';
 import {measureRead} from './lib/readDiagnostics';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
@@ -172,6 +173,7 @@ function AppContent({ user }: { user: User }) {
     try{const plans=await getMonitoringPlans(selectedOfficeId,refresh);setAllPlans(plans);}catch(error){setReadError(describeReadError(error));}
   },[selectedOfficeId,officeInitialized]);
   useEffect(()=>{let cancelled=false;if(officeInitialized)getMonitoringPlans(selectedOfficeId).then(plans=>{if(!cancelled)setAllPlans(plans);}).catch(error=>{if(!cancelled)setReadError(describeReadError(error));});return()=>{cancelled=true;};},[selectedOfficeId,officeInitialized]);
+  useEffect(()=>{const changed=(event:Event)=>{const plan=(event as CustomEvent).detail;if(plan?.officeId!==selectedOfficeId||!plan.id)return;patchMonitoringPlan(plan);setAllPlans(previous=>[...previous.filter(value=>value.id!==plan.id),plan]);};window.addEventListener('syorui-task-plan-saved',changed);return()=>window.removeEventListener('syorui-task-plan-saved',changed);},[selectedOfficeId]);
   // モニタリング通知判定ヘルパー
   const checkNeedsMonitoring = (childId: string) => {
     const childPlans = allPlans.filter(p => p.childId === childId && p.officeId === selectedOfficeId && p.archived !== true);
@@ -229,6 +231,7 @@ function AppContent({ user }: { user: User }) {
     {!readError && officeReadError && <div role="alert" className="fixed inset-x-4 top-4 z-[10000] rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">事業所情報を読み込めませんでした。{officeReadError}<button type="button" className="ml-4 underline" onClick={() => void initOffice()}>再試行</button></div>}
     <StaffAccountContext.Provider value={staffAccount}>
     <OfficeNavigationContext.Provider value={{children,offices,showAssignedOnlyByDefault,onOfficeChange:changeOffice}}>
+    <AccountTasksProvider uid={user.uid} officeId={selectedOfficeId} childrenData={filteredChildren} plans={allPlans} enabled={officeInitialized} refreshPlans={()=>void refreshMonitoring()}>
     <Routes>
       <Route element={
         <Layout 
@@ -290,6 +293,7 @@ function AppContent({ user }: { user: User }) {
       {/* 未マッチはトップへ */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </AccountTasksProvider>
     </OfficeNavigationContext.Provider>
     </StaffAccountContext.Provider>
     </>
@@ -321,7 +325,7 @@ function App() {
     return <Login />;
   }
 
-  return <AppContent user={user} />;
+  return <AppContent key={user.uid} user={user} />;
 }
 
 export default App;

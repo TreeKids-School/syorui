@@ -1,3 +1,4 @@
+import {notifyAccountTasksChanged} from '../lib/accountTaskEvents';
 import {useAccountSummaryOrder} from '../hooks/useAccountSummaryOrder';
 import {SUMMARY_COUNT_ROWS,normalizeHiddenCountRows,summaryCountValue,filterZeroAttendanceChildren} from '../lib/summaryTableRows';
 import {AdoptionCalculationExample} from '../components/AdoptionCalculationExample';
@@ -446,7 +447,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
 
     try {
       const assignDocRef = doc(db, 'offices', selectedOfficeId, 'monthly_staff_assignments', currentMonth);
-      const batch=writeBatch(db);batch.set(assignDocRef,{assignments:newAssignments,updatedAt:serverTimestamp()},{mergeFields:['assignments','updatedAt']});logStaffAssignments(batch,assignedStaffMap,newAssignments);await batch.commit();
+      const batch=writeBatch(db);batch.set(assignDocRef,{assignments:newAssignments,updatedAt:serverTimestamp()},{mergeFields:['assignments','updatedAt']});logStaffAssignments(batch,assignedStaffMap,newAssignments);await batch.commit();notifyAccountTasksChanged(selectedOfficeId);
     } catch (e) {
       console.error("Failed to save staff assignments:", e);
     }
@@ -1145,7 +1146,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
     setIsSavingStaffAssignments(true);
     setStaffActionError('');
     try {
-      const batch=writeBatch(db);batch.set(doc(db,'offices',selectedOfficeId,'monthly_staff_assignments',currentMonth),{assignments:{},updatedAt:serverTimestamp()},{mergeFields:['assignments','updatedAt']});logStaffAssignments(batch,assignedStaffMap,{});await batch.commit();
+      const batch=writeBatch(db);batch.set(doc(db,'offices',selectedOfficeId,'monthly_staff_assignments',currentMonth),{assignments:{},updatedAt:serverTimestamp()},{mergeFields:['assignments','updatedAt']});logStaffAssignments(batch,assignedStaffMap,{});await batch.commit();notifyAccountTasksChanged(selectedOfficeId);
       if (adoptionScope.current === scope) {
         setAssignedStaffMap({});
         setIsClearStaffOpen(false);
@@ -1177,7 +1178,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
     try {
       setIsSavingStaffAssignments(true);
       const assignDocRef = doc(db, 'offices', selectedOfficeId, 'monthly_staff_assignments', currentMonth);
-      const batch=writeBatch(db);batch.set(assignDocRef,{assignments:newAssignments,distributionOptions:{excludeIndividualDays:excludeIndividualWritingDays},updatedAt:serverTimestamp()},{mergeFields:['assignments','distributionOptions.excludeIndividualDays','updatedAt']});logStaffAssignments(batch,assignedStaffMap,newAssignments);await batch.commit();
+      const batch=writeBatch(db);batch.set(assignDocRef,{assignments:newAssignments,distributionOptions:{excludeIndividualDays:excludeIndividualWritingDays},updatedAt:serverTimestamp()},{mergeFields:['assignments','distributionOptions.excludeIndividualDays','updatedAt']});logStaffAssignments(batch,assignedStaffMap,newAssignments);await batch.commit();notifyAccountTasksChanged(selectedOfficeId);
     } catch (e) {
       console.error("Failed to save distributed staff assignments:", e);
     } finally {
@@ -1800,7 +1801,7 @@ export const MonthlySummary: React.FC<MonthlySummaryProps> = ({
                         onMouseEnter={() => isFocusHighlightEnabled && setHoveredColChildId(child.id || null)}
                         onMouseLeave={() => isFocusHighlightEnabled && setHoveredColChildId(null)}
                       >
-                        {completedChildren.scope===selectedOfficeId+'_'+currentMonth&&completedChildren.ids.has(child.id!)&&<span role="img" aria-label="今月の専門的支援実施計画は完了" title="今月の専門的支援実施計画は完了" data-print-exclude className="mb-1 flex justify-center text-emerald-600 print:hidden"><Check size={15}/></span>}
+                        {completedChildren.scope===selectedOfficeId+'_'+currentMonth&&completedChildren.ids.has(child.id!)&&<span role="img" aria-label="今月の専門的支援実施計画は完了" title="今月の専門的支援実施計画は完了" data-print-exclude className="mx-auto mb-1 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-600 text-white print:hidden"><Check size={14} strokeWidth={3}/></span>}
                         <div 
                           className={`inline-block text-xs font-bold leading-none transition-colors duration-150 ${
                             isColHovered ? 'text-blue-950 font-black scale-105' : 'text-slate-700'

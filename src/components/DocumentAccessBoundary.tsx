@@ -8,7 +8,7 @@ import type {Firestore,Transaction,WriteBatch} from 'firebase/firestore';
 import {auth,db} from '../lib/firebase';
 import {measureRead} from '../lib/readDiagnostics';
 import {describeReadError} from '../lib/readError';
-import {createDocumentLeaseStore,DOCUMENT_LEASE_HEARTBEAT,ownsDocumentLease,documentLeasePath} from '../lib/documentLeaseModel';
+import {createDocumentLeaseStore,DOCUMENT_LEASE_HEARTBEAT,ownsDocumentLease,documentLeasePath,documentLeaseObservation} from '../lib/documentLeaseModel';
 import type {DocumentLease} from '../lib/documentLeaseModel';
 import {guardedWriteBatch} from '../lib/guardedWriteBatch';
 import {StaffAccountContext} from './StaffAccountBadge';
@@ -36,7 +36,7 @@ function LeaseGate({officeId,childId,book,children}:{officeId:string;childId:str
   const mounted=useRef(false),attempt=useRef(0),busy=useRef(false),dismissed=useRef(''),renewCurrent=useRef<(()=>Promise<void>)|null>(null);
   const access=useMemo(()=>{
     const track=<T,>(promise:Promise<T>)=>{pending.current.add(promise);void promise.then(()=>pending.current.delete(promise),()=>pending.current.delete(promise));return promise;};
-    const verify=async(transaction:Transaction)=>{if(!permitted.current||!held.current)throw new Error('書類の編集権がないため保存を中止しました。画面の入力内容は保持しています。');const snapshot=await measureRead('保存時の編集権確認',transaction.get(ref));const lease=snapshot.exists()?snapshot.data() as DocumentLease:null;if(!ownsDocumentLease(lease,held.current,Date.now())){permitted.current=false;if(mounted.current){setOwner(lease);setStatus('busy');}throw new Error('別の画面が書類を開いたか、編集権の期限が切れたため保存を中止しました。');}};
+    const verify=async(transaction:Transaction)=>{if(!permitted.current||!held.current)throw new Error('書類の編集権がないため保存を中止しました。画面の入力内容は保持しています。');const snapshot=await measureRead('保存時の編集権確認',transaction.get(ref));const lease=snapshot.exists()?snapshot.data() as DocumentLease:null;if(!ownsDocumentLease(lease,held.current,Date.now())){permitted.current=false;if(mounted.current){setOwner(lease);const foreign=lease&&lease.expiresAt>Date.now()&&lease.sessionId!==identity.current.sessionId;setStatus(foreign?'busy':'checking');if(!foreign)void renewCurrent.current?.();}throw new Error('別の画面が書類を開いたか、編集権の期限が切れたため保存を中止しました。');}};
     return {track,verify,writeBatch:(database:Firestore)=>guardedWriteBatch<Transaction>(body=>runTransaction(database,body),verify,track) as unknown as WriteBatch};
   },[ref]);
   const check=async()=>{
@@ -48,14 +48,17 @@ function LeaseGate({officeId,childId,book,children}:{officeId:string;childId:str
   };
   useEffect(()=>{
     restarting.current=false;mounted.current=true;void check();
-    const unsubscribe=onSnapshot(ref,snapshot=>{
+    const unsubscribe=onSnapshot(ref,{includeMetadataChanges:true},snapshot=>{
       if(!mounted.current)return;const lease=snapshot.exists()?snapshot.data() as DocumentLease:null;observed.current=lease;
-      if(held.current&&permitted.current){
-        if(!ownsDocumentLease(lease,held.current,Date.now())){permitted.current=false;setOwner(lease);setStatus('busy');return;}
+      if(held.current){
+        const observation=documentLeaseObservation(lease,held.current,Date.now(),snapshot.metadata,busy.current);
+        if(observation==='ignore')return;
+        if(observation==='busy'){permitted.current=false;setOwner(lease);setStatus('busy');return;}
+        if(observation==='recover'){permitted.current=false;setStatus('checking');void check();return;}
         if(lease?.notice&&lease.notice.sessionId!==identity.current.sessionId&&lease.notice.id!==dismissed.current)setNotice({id:lease.notice.id,name:lease.notice.name});
-      }else setOwner(lease);
+      }else if(!snapshot.metadata.fromCache&&!snapshot.metadata.hasPendingWrites)setOwner(lease);
     },error=>{if(mounted.current){permitted.current=false;setError(describeReadError(error));setStatus('paused');}});
-    const renew=async()=>{const lease=held.current;if(!lease||!mounted.current||busy.current)return;busy.current=true;try{const result=await access.track(store.renew({...lease,name:identity.current.name}));if(!mounted.current)return;if(result.status==='held'){held.current=result.owner;permitted.current=true;setOwner(result.owner);setStatus('held');setError('');}else{permitted.current=false;setOwner(result.owner);setStatus('busy');}}catch(error){if(mounted.current){permitted.current=false;setError(describeReadError(error));setStatus('paused');}}finally{busy.current=false;}};
+    const renew=async()=>{const lease=held.current;if(!lease||!mounted.current||busy.current)return;const ticket=attempt.current;busy.current=true;try{const result=await access.track(store.renew({...lease,name:identity.current.name}));if(!mounted.current||ticket!==attempt.current)return;if(result.status==='held'){held.current=result.owner;permitted.current=true;setOwner(result.owner);setStatus('held');setError('');const attempted=result.owner.notice;if(attempted&&attempted.sessionId!==identity.current.sessionId&&attempted.id!==dismissed.current)setNotice({id:attempted.id,name:attempted.name});}else{permitted.current=false;setOwner(result.owner);const foreign=result.owner&&result.owner.expiresAt>Date.now()&&result.owner.sessionId!==identity.current.sessionId;setStatus(foreign?'busy':'checking');if(!foreign){busy.current=false;void check();}}}catch(error){if(mounted.current&&ticket===attempt.current){permitted.current=false;setError(describeReadError(error));setStatus('paused');}}finally{if(ticket===attempt.current)busy.current=false;}};
     renewCurrent.current=renew;
     const drain=()=>{const lease=held.current;setTimeout(()=>{void (async()=>{while(pending.current.size)await Promise.allSettled([...pending.current]);if(lease)await store.release(lease);})().catch(()=>{});},0);};
     const interval=setInterval(()=>void renew(),DOCUMENT_LEASE_HEARTBEAT);
@@ -68,7 +71,7 @@ function LeaseGate({officeId,childId,book,children}:{officeId:string;childId:str
     };
   },[store,ref,access,watchRetry]);
   useEffect(()=>{if(status==='held'&&held.current&&held.current.name!==identity.current.name)void renewCurrent.current?.();},[account.name,status,owner]);
-  useEffect(()=>{if(status!=='held'||!held.current)return;const timeout=setTimeout(()=>{permitted.current=false;setStatus('paused');setError('編集権の更新を確認できません。入力内容を保持したまま停止しました。再確認してください。');},Math.max(0,held.current.expiresAt-Date.now()));return()=>clearTimeout(timeout);},[status,owner]);
+  useEffect(()=>{if(status!=='held'||!held.current)return;const timeout=setTimeout(()=>{permitted.current=false;setStatus('checking');void renewCurrent.current?.();},Math.max(0,held.current.expiresAt-Date.now()));return()=>clearTimeout(timeout);},[status,owner]);
   const writable=status==='held';
   return <DocumentAccessContext.Provider value={{...access,writable}}>
     {opened&&<div inert={!writable} aria-hidden={!writable||undefined}>{children}</div>}

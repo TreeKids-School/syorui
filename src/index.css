@@ -570,3 +570,7 @@ html, body {
 @media (orientation: landscape) {
   .mobile-bottom-bar[data-sort="false"] { display: none; }
 }
+
+@media (max-width: 767px) {
+  .mobile-page-content, .summary-mobile-content, body:has(.mobile-document-header) .mobile-page-content { padding-bottom: calc(var(--mobile-bottom-bar-height, 5rem) + 12px); }
+}

@@ -1,3 +1,4 @@
+import {professionalEditorRecord,professionalBlankPeriodKey} from '../lib/professionalEditorRecord';
 import {useDocumentAccess} from '../components/DocumentAccessBoundary';
 import {createPortal} from 'react-dom';
 import {measureReads} from '../lib/readDiagnostics';
@@ -252,6 +253,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
 
   // 6ヶ月更新・年単位切り替え用の状態
   const [availableMonths, setAvailableMonths] = useState<string[]>([]);
+  const [blankPeriods,setBlankPeriods]=useState<Set<string>>(()=>new Set());
   const [showArchived, setShowArchived] = useState<boolean>(false);
   const [periodArchiveMap, setPeriodArchiveMap] = useState<Record<string, boolean>>({});
 
@@ -269,6 +271,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
     batch.set(doc(db,target.collection,target.id),{...content,updatedAt:serverTimestamp()},{merge:true});
     auditDocumentWrite(batch,{officeId:String(target.data.officeId),book:'professional',childId:String(target.data.childId),month:String(target.data.startMonth),documentId:target.id,label:target.collection==='serviceHoursPlans'?'利用時間':target.data.status==='draft'?'案':'本案'},previous.data,content);
     await batch.commit();
+    if(target.collection==='professionalPlans'&&target.data.status==='final')window.dispatchEvent(new CustomEvent('syorui-task-plan-saved',{detail:{id:target.id,childId:target.data.childId,officeId:target.data.officeId,startMonth:target.data.startMonth,createdAt:target.data.createdAt,archived:target.data.archived===true,isPrimary:target.data.isPrimary===true,variantIndex:target.data.variantIndex}}));
   },(key,status)=>{if(activeScope.current===key)setAutoStatus(status);});
   useEffect(()=>()=>{void autoSaver.current!.flush(scope).catch(()=>{});},[scope]);
   useEffect(()=>{if(documentAccess.writable)void autoSaver.current!.flushAll().catch(()=>{});},[documentAccess.writable]);
@@ -327,11 +330,8 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
       const selected=logTarget?(logTarget.variantIndex||0):explicitVariantScope.current===localSelectionScope&&eligible.some(record=>(record.variantIndex||0)===variantIndex)?variantIndex:preferred;
       explicitVariantScope.current=localSelectionScope;
       if(selected!==variantIndex){setVariantIndex(selected);return;}
-      let value=eligible.find(record=>(record.variantIndex||0)===selected);
-      if(!value){
-        if(showArchived||records.length)return;
-        value=activeTab==='hours'?defaultHoursPlan(childId,currentMonth):{...defaultPlan(childId),status:activeTab,startMonth:currentMonth};
-      }
+      let value=professionalEditorRecord<ProfessionalPlanDoc|ServiceHoursPlan>(eligible.find(record=>(record.variantIndex||0)===selected),{explicitlyAdded:blankPeriods.has(professionalBlankPeriodKey(selectedOfficeId,childId,currentMonth)),archived:showArchived,existingCount:records.length},()=>activeTab==='hours'?defaultHoursPlan(childId,currentMonth):{...defaultPlan(childId),status:activeTab,startMonth:currentMonth});
+      if(!value)return;
       if(activeTab!=='hours')value={...value,managerName:cleanProfessionalManagerName((value as ProfessionalPlanDoc).managerName)||defaultManager} as ProfessionalPlanDoc;
       autoSaver.current!.loaded(loadScope,professionalPlanDraft(value,childId,selectedOfficeId,currentMonth,activeTab));
       logTargetPending.current=false;
@@ -339,7 +339,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
       if(activeTab==='hours')setHoursPlan(value as ServiceHoursPlan);else setPlan(value as ProfessionalPlanDoc);
     }catch(error){console.error('fetchData error:',error);if(valid())setAutoStatus('error');}
     finally{if(valid())setIsLoading(false);}
-  },[childId,currentMonth,activeTab,selectedOfficeId,variantIndex,showArchived]);
+  },[childId,currentMonth,activeTab,selectedOfficeId,variantIndex,showArchived,blankPeriods]);
 
   useEffect(() => {
     fetchAvailableMonths();
@@ -565,6 +565,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
       const plans=plansSnap.docs.map(record=>({...record.data(),id:record.id} as ProfessionalPlanDoc)).filter(value=>(value.startMonth||value.createdAt?.slice(0,7))===currentMonth&&(value.archived===true)===showArchived);
       const hours=hoursSnap.docs.map(record=>({...record.data(),id:record.id} as ServiceHoursPlan)).filter(value=>value.startMonth===currentMonth&&(value.archived===true)===showArchived);
       const defaultManager=await getProfessionalManager(selectedOfficeId).catch(()=> '');
+      if(!plans.length&&!hours.length&&!plan&&!hoursPlan)return [];
       const documents:ProfessionalPrintDocument[]=[];
       const common={childName:selectedChild.fullName,officeName};
       for(const kind of ['final','draft','hours'] as const){
@@ -581,7 +582,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
   };
   const handlePrintAll=async()=>{
     setIsSaving(true);
-    try{setPrintDocuments(await loadPeriodDocuments(true));}
+    try{const documents=await loadPeriodDocuments(true);if(!documents.length){setDocumentActionError('印刷する個別支援計画書がありません。');return;}setPrintDocuments(documents);}
     catch(error){console.error(error);alert('印刷用のデータを取得できませんでした。');}
     finally{setIsSaving(false);}
   };
@@ -658,6 +659,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
         const copiedKinds=targets.map(target=>target.collection===HOURS_PLAN_COL?'hours':target.data.status as 'final'|'draft');
         if(!copiedKinds.includes(activeTab))setActiveTab(copiedKinds[0]);
       }
+      if(addMode==='blank')setBlankPeriods(previous=>new Set([...previous,professionalBlankPeriodKey(selectedOfficeId,childId,newMonth)]));
       setAvailableMonths(previous=>Array.from(new Set([...previous,newMonth])).sort());
       setCurrentMonth(newMonth);setAddMonthOpen(false);
     }catch(error){setAddMonthError(error instanceof Error?error.message:'対象月を追加できませんでした。');}
@@ -705,7 +707,7 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
         </div>
         {variantOptions.length>1&&<DropdownSelect label="同月の書類を選択" value={String(variantIndex)} options={variantOptions.map(index=>({value:String(index),label:(activeTab==='final'?'本案':activeTab==='draft'?'案':'利用時間')+professionalVariantSuffix(index)+(!showArchived&&index===primaryIndex?'（メイン）':'')}))} onChange={value=>{explicitVariantScope.current=selectionScope;setVariantIndex(Number(value));}}/>}
         {!showArchived&&variantOptions.length>1&&(variantIndex===primaryIndex?<span className="inline-flex items-center gap-1 text-xs font-semibold text-primary"><CheckCircle2 size={16}/>メイン</span>:<button type="button" disabled={isSaving} onClick={()=>void setCurrentAsPrimary()} className="min-h-10 rounded-xl border border-slate-200 px-3 text-sm text-slate-700 disabled:opacity-50">メインに設定</button>)}
-        <div className="ml-auto"><InlineDateEditor key={childId+'_'+selectedOfficeId+'_'+currentMonth+'_'+activeTab+'_'+variantIndex} label={activeTab==='draft'?'作成年月日':'開始年月日'} value={dateStr} onChange={value=>{if(activeTab==='hours')setHoursPlan(previous=>previous?{...previous,effectiveStartDate:value}:previous);else update('createdAt',value);}}/></div>
+        {isPeriodStatusMatch&&<div className="ml-auto"><InlineDateEditor key={childId+'_'+selectedOfficeId+'_'+currentMonth+'_'+activeTab+'_'+variantIndex} label={activeTab==='draft'?'作成年月日':'開始年月日'} value={dateStr} onChange={value=>{if(activeTab==='hours')setHoursPlan(previous=>previous?{...previous,effectiveStartDate:value}:previous);else update('createdAt',value);}}/></div>}
       </div>
   );
 
@@ -1348,15 +1350,12 @@ export const ProfessionalPerspective: React.FC<Props> = ({ childrenData, selecte
         </div>
       )}
 
-      {/* データがステータス不一致または存在しない場合のプレースホルダー */}
-      {!isPeriodStatusMatch && (
-        <div className="bg-white border border-slate-200 rounded-3xl p-6 text-center text-slate-400">
-          {documentControls}
-          {showArchived 
-            ? 'アーカイブされた書類はありません。' 
-            : 'この月はアーカイブされています。「アーカイブを見る」をONにしてご覧ください。'}
-        </div>
-      )}
+      {/* 書類がない場合は、閲覧だけで初期書式を作らない。 */}
+      {!isPeriodStatusMatch&&<section role="status" className="rounded-2xl border border-slate-200 bg-white p-6 text-center print:hidden">
+        {availableMonths.length>0&&documentControls}
+        <p className="py-8 text-sm text-slate-500">{showArchived?'アーカイブされた書類はありません。':'個別支援計画書がありません'}</p>
+        {!showArchived&&<div className="flex flex-wrap justify-center gap-3"><button type="button" onClick={handleAddPeriod} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm text-slate-700 hover:bg-slate-50"><Plus size={18}/>月を追加</button><button type="button" onClick={()=>setTransferDirection('import')} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm text-slate-700 hover:bg-slate-50"><UploadCloud size={18}/>インポート</button></div>}
+      </section>}
 
       {managerSettingsOpen&&<ProfessionalManagerSettings key={selectedOfficeId} officeId={selectedOfficeId} officeName={officeName} currentName={plan?.managerName} onSaved={(name,apply)=>{if(apply)setPlan(previous=>previous?{...previous,managerName:name}:previous);}} onClose={()=>setManagerSettingsOpen(false)}/>}
       {/* インポートモーダル */}

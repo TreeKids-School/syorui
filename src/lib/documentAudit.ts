@@ -1,6 +1,6 @@
 import {collection,doc,serverTimestamp} from 'firebase/firestore';
 import {auth,db} from './firebase';
-import {auditEntryId,auditScopes,describeDocumentChanges} from './documentAuditModel';
+import {auditEntryId,auditScopes,describeDocumentChanges,auditHistoryCategory} from './documentAuditModel';
 import type {AuditBook,AuditChange} from './documentAuditModel';
 let actor={uid:'',name:'',color:'#64748b'};
 let childNames=new Map<string,string>();
@@ -13,6 +13,6 @@ export function appendDocumentAudit(writer:{set:(...args:any[])=>unknown},contex
   const uid=auth?.currentUser?.uid||'',identity=actor.uid===uid?actor:null;
   const ref=collection(db,'offices',context.officeId,'document_change_history');
   const id=auditEntryId(Date.now(),doc(ref).id);
-  writer.set(doc(ref,id),{...context,childName:childNames.get(context.childId)||'',documentId:context.documentId||'',label:context.label||'',operation:context.operation||'編集',actorUid:uid,actorName:identity?.name||auth?.currentUser?.displayName||'名称未登録',actorColor:identity?.color||'#64748b',createdAt:serverTimestamp(),scopes:auditScopes(context.book,context.childId,context.month),changes});
+  writer.set(doc(ref,id),{...context,category:auditHistoryCategory({...context,changes}),childName:childNames.get(context.childId)||'',documentId:context.documentId||'',label:context.label||'',operation:context.operation||'編集',actorUid:uid,actorName:identity?.name||auth?.currentUser?.displayName||'名称未登録',actorColor:identity?.color||'#64748b',createdAt:serverTimestamp(),scopes:auditScopes(context.book,context.childId,context.month),changes});
 }
 export function auditDocumentWrite(writer:{set:(...args:any[])=>unknown},context:AuditContext,before:any,after:any){appendDocumentAudit(writer,context,describeDocumentChanges(before,after));}
